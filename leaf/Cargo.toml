@@ -84,7 +84,7 @@ all-endpoints = [
     "outbound-static",
     "outbound-tryall",
     "outbound-chain",
-    # "outbound-select",
+    "outbound-select",
 ]
 
 # Ring-related
