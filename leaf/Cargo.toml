@@ -67,6 +67,7 @@ all-endpoints = [
     "inbound-shadowsocks",
     "inbound-socks",
     "inbound-tun",
+    "inbound-nf",
     "inbound-cat",
     # outbounds
     "outbound-direct",
