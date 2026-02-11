@@ -5,11 +5,11 @@ use std::{
 };
 
 #[cfg(target_os = "android")]
-use jni::objects::*;
+use jni::objects::{GlobalRef, JClass, JString};
 #[cfg(target_os = "android")]
-use jni::sys::*;
+use jni::sys::{jboolean, jint, JNI_VERSION_1_6};
 #[cfg(target_os = "android")]
-use jni::*;
+use jni::{JNIEnv, JavaVM};
 
 /// No error.
 pub const ERR_OK: i32 = 0;
