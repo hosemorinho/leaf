@@ -312,6 +312,8 @@ pub enum InboundSettings {
     },
     Socks,
     Http,
+    #[serde(rename = "mixed", alias = "http+socks", alias = "socks+http")]
+    Mixed,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -625,6 +627,10 @@ pub fn to_internal(mut config: Config) -> Result<internal::Config> {
                 }
                 InboundSettings::Http => {
                     inbound.protocol = "http".to_string();
+                    inbounds.push(inbound);
+                }
+                InboundSettings::Mixed => {
+                    inbound.protocol = "mixed".to_string();
                     inbounds.push(inbound);
                 }
                 InboundSettings::Shadowsocks {

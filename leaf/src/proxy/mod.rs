@@ -47,6 +47,8 @@ pub mod failover;
 pub mod hc;
 #[cfg(feature = "inbound-http")]
 pub mod http;
+#[cfg(feature = "inbound-mixed")]
+pub mod mixed;
 #[cfg(all(feature = "inbound-nf", windows))]
 pub mod nf;
 #[cfg(feature = "outbound-obfs")]
