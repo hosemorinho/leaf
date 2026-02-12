@@ -9,6 +9,9 @@ use tokio::sync::mpsc::channel as tokio_channel;
 use tokio::sync::mpsc::{Receiver as TokioReceiver, Sender as TokioSender};
 use tracing::{debug, error, info, warn};
 
+#[cfg(target_os = "windows")]
+use std::path::PathBuf;
+
 use crate::{
     app::dispatcher::Dispatcher,
     app::fake_dns::{FakeDns, FakeDnsMode},
@@ -164,10 +167,17 @@ pub fn new(
 ) -> Result<Runner> {
     let settings = TunInboundSettings::parse_from_bytes(&inbound.settings)?;
 
+    info!("TUN inbound: configuring (fd={}, auto={}, name={:?})",
+        settings.fd, settings.auto,
+        if settings.fd < 0 && !settings.auto { &settings.name } else { &String::new() });
+
     let mut cfg = tun::Configuration::default();
     if settings.fd >= 0 {
+        info!("TUN inbound: using raw fd={}", settings.fd);
         cfg.raw_fd(settings.fd);
     } else if settings.auto {
+        info!("TUN inbound: auto mode — name={}, addr={}, gw={}, mtu=1500",
+            &*option::DEFAULT_TUN_NAME, &*option::DEFAULT_TUN_IPV4_ADDR, &*option::DEFAULT_TUN_IPV4_GW);
         cfg.tun_name(&*option::DEFAULT_TUN_NAME)
             .address(&*option::DEFAULT_TUN_IPV4_ADDR)
             .destination(&*option::DEFAULT_TUN_IPV4_GW)
@@ -180,6 +190,8 @@ pub fn new(
 
         cfg.up();
     } else {
+        info!("TUN inbound: manual mode — name={}, addr={}, gw={}, mtu={}",
+            &settings.name, &settings.address, &settings.gateway, settings.mtu);
         cfg.tun_name(settings.name)
             .address(settings.address)
             .destination(settings.gateway)
@@ -191,6 +203,30 @@ pub fn new(
         }
 
         cfg.up();
+    }
+
+    // Windows: configure wintun.dll path relative to ASSET_LOCATION or exe dir.
+    // By default the `tun` crate looks for "wintun.dll" relative to CWD which
+    // may differ from the exe directory in Flutter apps. We resolve it to an
+    // absolute path next to the executable (or in ASSET_LOCATION).
+    #[cfg(target_os = "windows")]
+    {
+        let wintun_path = find_wintun_dll();
+        info!("TUN inbound: wintun.dll resolved to {:?}", wintun_path);
+        if let Some(path) = &wintun_path {
+            if !path.exists() {
+                error!("TUN inbound: wintun.dll NOT FOUND at {:?}", path);
+                return Err(anyhow!(
+                    "wintun.dll not found at {:?}. Download from https://www.wintun.net/ \
+                     and place next to the executable.", path
+                ));
+            }
+            cfg.platform_config(|c| {
+                c.wintun_file(path);
+            });
+        } else {
+            warn!("TUN inbound: could not determine exe directory, using default wintun.dll path");
+        }
     }
 
     // FIXME it's a bad design to have 2 lists in config while we need only one
@@ -208,7 +244,13 @@ pub fn new(
     };
     let fakedns = Arc::new(FakeDns::new(fake_dns_mode, fake_dns_filters));
 
-    let tun = tun::create_as_async(&cfg).map_err(|e| anyhow!("create tun failed: {}", e))?;
+    info!("TUN inbound: creating async TUN device...");
+    let tun = tun::create_as_async(&cfg).map_err(|e| {
+        error!("TUN inbound: create_as_async FAILED: {}", e);
+        anyhow!("create tun failed: {}. On Windows: ensure wintun.dll is next to the \
+                 executable and the app is running as Administrator.", e)
+    })?;
+    info!("TUN inbound: async TUN device created successfully");
 
     if settings.auto {
         assert!(settings.fd == -1, "tun-auto is not compatible with tun-fd");
@@ -289,4 +331,33 @@ pub fn new(
         info!("start tun inbound");
         futures::future::select_all(futs).await;
     }))
+}
+
+#[cfg(target_os = "windows")]
+fn find_wintun_dll() -> Option<PathBuf> {
+    let asset_loc = std::path::Path::new(&*option::ASSET_LOCATION);
+    let in_assets = asset_loc.join("wintun.dll");
+    if in_assets.exists() {
+        return Some(in_assets);
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            let next_to_exe = exe_dir.join("wintun.dll");
+            if next_to_exe.exists() {
+                return Some(next_to_exe);
+            }
+            info!("TUN: wintun.dll not at {:?}", next_to_exe);
+        }
+    }
+
+    let cwd = std::env::current_dir().ok()?;
+    let in_cwd = cwd.join("wintun.dll");
+    if in_cwd.exists() {
+        return Some(in_cwd);
+    }
+
+    info!("TUN: wintun.dll not found in ASSET_LOCATION({:?}), exe dir, or CWD({:?})",
+        asset_loc, cwd);
+    None
 }
