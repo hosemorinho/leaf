@@ -381,19 +381,44 @@ pub async fn connect_stream_outbound(
     dns_client: SyncDnsClient,
     handler: &AnyOutboundHandler,
 ) -> io::Result<Option<AnyStream>> {
-    match handler.stream()?.connect_addr() {
-        OutboundConnect::Proxy(Network::Tcp, addr, port) => {
-            Ok(Some(new_tcp_stream(dns_client, &addr, &port).await?))
+    let connect_addr = handler.stream()?.connect_addr();
+    match connect_addr {
+        OutboundConnect::Proxy(Network::Tcp, ref addr, ref port) => {
+            tracing::warn!(
+                "connect_stream_outbound [{}]: dest={} -> proxy={}:{} handler=[{}]",
+                sess.network,
+                sess.destination,
+                addr,
+                port,
+                handler.tag(),
+            );
+            Ok(Some(new_tcp_stream(dns_client, addr, port).await?))
         }
-        OutboundConnect::Direct => Ok(Some(
-            new_tcp_stream(
-                dns_client,
-                &sess.destination.host(),
-                &sess.destination.port(),
-            )
-            .await?,
-        )),
-        _ => Ok(None),
+        OutboundConnect::Direct => {
+            tracing::warn!(
+                "connect_stream_outbound [{}]: dest={} -> DIRECT handler=[{}]",
+                sess.network,
+                sess.destination,
+                handler.tag(),
+            );
+            Ok(Some(
+                new_tcp_stream(
+                    dns_client,
+                    &sess.destination.host(),
+                    &sess.destination.port(),
+                )
+                .await?,
+            ))
+        }
+        _ => {
+            tracing::warn!(
+                "connect_stream_outbound [{}]: dest={} -> NONE handler=[{}]",
+                sess.network,
+                sess.destination,
+                handler.tag(),
+            );
+            Ok(None)
+        }
     }
 }
 

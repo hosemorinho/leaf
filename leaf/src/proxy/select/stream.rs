@@ -32,13 +32,15 @@ impl OutboundStreamHandler for Handler {
     ) -> io::Result<AnyStream> {
         let idx = self.selected.load(Ordering::Relaxed);
         let a = &self.actors[idx];
+        let addr = a.stream().map(|h| h.connect_addr()).ok();
         tracing::warn!(
-            "select [{}] idx={}/{} arc_ptr={:p} -> [{}]",
+            "select [{}] idx={}/{} arc_ptr={:p} -> [{}] addr={:?}",
             sess.destination,
             idx,
             self.actors.len(),
             &*self.selected as *const AtomicUsize,
             a.tag(),
+            addr,
         );
         a.stream()?.handle(sess, lhs, stream).await
     }
