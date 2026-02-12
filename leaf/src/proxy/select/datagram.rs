@@ -37,8 +37,16 @@ impl OutboundDatagramHandler for Handler {
         sess: &'a Session,
         transport: Option<AnyOutboundTransport>,
     ) -> io::Result<AnyOutboundDatagram> {
-        let a = &self.actors[self.selected.load(Ordering::Relaxed)];
-        tracing::debug!("select handles to [{}]", a.tag());
+        let idx = self.selected.load(Ordering::Relaxed);
+        let a = &self.actors[idx];
+        tracing::warn!(
+            "select-udp [{}] idx={}/{} arc_ptr={:p} -> [{}]",
+            sess.destination,
+            idx,
+            self.actors.len(),
+            &*self.selected as *const AtomicUsize,
+            a.tag(),
+        );
         a.datagram()?.handle(sess, transport).await
     }
 }

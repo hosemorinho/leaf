@@ -74,7 +74,12 @@ impl OutboundSelector {
 
     pub fn set_selected(&mut self, tag: &str) -> Result<()> {
         if let Some(i) = self.handlers.iter().position(|x| x == tag) {
+            let old = self.selected.load(Ordering::Relaxed);
             self.selected.store(i, Ordering::Relaxed);
+            warn!(
+                "selector [{}] set_selected: {} → {} (tag={}) arc_ptr={:p}",
+                self.id, old, i, tag, &*self.selected as *const AtomicUsize,
+            );
             if let Err(e) = persist_selected_to_cache(self.id.clone(), tag.to_string()) {
                 warn!("persist selector state failed: {}", e);
             }

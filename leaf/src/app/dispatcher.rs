@@ -261,10 +261,11 @@ impl Dispatcher {
             warn!("handler not found");
             return;
         };
-        debug!(
-            "handling {}:{} with {}",
-            &sess.network,
+        warn!(
+            "dispatch_stream: {} -> {} via outbound=[{}] handler=[{}]",
+            &sess.source,
             &sess.destination,
+            &outbound,
             h.tag()
         );
 
