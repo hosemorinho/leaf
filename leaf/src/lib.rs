@@ -84,6 +84,8 @@ pub struct RuntimeManager {
     /// Pending config string for reload_with_config_string.
     /// Set before signaling reload; consumed by the async reload handler.
     pending_config: Mutex<Option<String>>,
+    /// Sender to cancel all active TCP connections (e.g. after proxy switch).
+    conn_cancel_tx: tokio::sync::watch::Sender<u64>,
 }
 
 impl RuntimeManager {
@@ -98,6 +100,7 @@ impl RuntimeManager {
         dns_client: Arc<RwLock<DnsClient>>,
         outbound_manager: Arc<RwLock<OutboundManager>>,
         stat_manager: SyncStatManager,
+        conn_cancel_tx: tokio::sync::watch::Sender<u64>,
     ) -> Arc<Self> {
         Arc::new(Self {
             #[cfg(feature = "auto-reload")]
@@ -114,6 +117,7 @@ impl RuntimeManager {
             #[cfg(feature = "auto-reload")]
             watcher: Mutex::new(None),
             pending_config: Mutex::new(None),
+            conn_cancel_tx,
         })
     }
 
@@ -204,6 +208,18 @@ impl RuntimeManager {
             return Ok(selector.read().await.get_available_tags());
         }
         Err(Error::Config(anyhow!("selector {} not found", outbound)))
+    }
+
+    /// Cancel all active TCP relay connections.
+    ///
+    /// This increments the watch channel value, causing all `tokio::select!`
+    /// branches in `Dispatcher::dispatch_stream_inner` to fire and break
+    /// their relay loops. New connections will use the currently selected
+    /// outbound.
+    pub fn close_connections(&self) {
+        let current = *self.conn_cancel_tx.borrow();
+        let _ = self.conn_cancel_tx.send(current.wrapping_add(1));
+        info!("close_connections: signalled cancel (generation={})", current.wrapping_add(1));
     }
 
     /// Get the last peer active time (in seconds) for an outbound
@@ -396,6 +412,16 @@ pub fn shutdown(key: RuntimeId) -> bool {
     false
 }
 
+/// Cancel all active TCP relay connections for the given runtime.
+/// New connections will use the currently selected outbound.
+pub fn close_connections(key: RuntimeId) -> bool {
+    if let Some(m) = RUNTIME_MANAGER.lock().unwrap().get(&key) {
+        m.close_connections();
+        return true;
+    }
+    false
+}
+
 pub fn is_running(key: RuntimeId) -> bool {
     RUNTIME_MANAGER.lock().unwrap().contains_key(&key)
 }
@@ -500,11 +526,16 @@ pub fn start(rt_id: RuntimeId, opts: StartOptions) -> Result<(), Error> {
     )));
     let stat_manager = Arc::new(RwLock::new(StatManager::new()));
     runners.push(StatManager::cleanup_task(stat_manager.clone()));
+
+    // Channel for cancelling active TCP connections (e.g. on proxy node switch).
+    let (conn_cancel_tx, conn_cancel_rx) = tokio::sync::watch::channel(0u64);
+
     let dispatcher = Arc::new(Dispatcher::new(
         outbound_manager.clone(),
         router.clone(),
         dns_client.clone(),
         stat_manager.clone(),
+        conn_cancel_rx,
     ));
 
     let dispatcher_weak = Arc::downgrade(&dispatcher);
@@ -577,6 +608,7 @@ pub fn start(rt_id: RuntimeId, opts: StartOptions) -> Result<(), Error> {
         dns_client,
         outbound_manager,
         stat_manager,
+        conn_cancel_tx,
     );
 
     // Monitor config file changes.

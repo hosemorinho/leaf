@@ -216,6 +216,19 @@ pub extern "C" fn leaf_shutdown(rt_id: u16) -> bool {
     leaf::shutdown(rt_id)
 }
 
+/// Closes all active TCP relay connections.
+///
+/// After a proxy node switch, existing TCP connections are still relaying
+/// through the old proxy server. This function cancels all active relay
+/// loops so that new connections will use the newly selected outbound.
+///
+/// @param rt_id The ID of the leaf instance.
+/// @return Returns true on success, false if runtime not found.
+#[no_mangle]
+pub extern "C" fn leaf_close_connections(rt_id: u16) -> bool {
+    leaf::close_connections(rt_id)
+}
+
 /// Tests the configuration.
 ///
 /// @param config_path The path of the config file, must be a file with suffix .conf
@@ -727,6 +740,18 @@ pub unsafe extern "system" fn Java_com_follow_clash_core_LeafBridge_leafShutdown
     rt_id: jint,
 ) -> jboolean {
     leaf_shutdown(rt_id as u16) as jboolean
+}
+
+/// JNI: Close all active TCP connections.
+#[cfg(target_os = "android")]
+#[allow(non_snake_case)]
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_follow_clash_core_LeafBridge_leafCloseConnections(
+    _env: JNIEnv,
+    _class: JClass,
+    rt_id: jint,
+) -> jboolean {
+    leaf_close_connections(rt_id as u16) as jboolean
 }
 
 /// JNI: Test config.

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use async_recursion::async_recursion;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::RwLock;
+use tokio::sync::{watch, RwLock};
 use tracing::{debug, info, warn, Instrument};
 
 use crate::{
@@ -147,6 +147,9 @@ pub struct Dispatcher {
     router: Arc<RwLock<Router>>,
     dns_client: SyncDnsClient,
     stat_manager: SyncStatManager,
+    /// Cancellation signal for active TCP connections.
+    /// When the value changes, all relay loops break and connections close.
+    conn_cancel_rx: watch::Receiver<u64>,
 }
 
 impl Dispatcher {
@@ -155,12 +158,14 @@ impl Dispatcher {
         router: Arc<RwLock<Router>>,
         dns_client: SyncDnsClient,
         stat_manager: SyncStatManager,
+        conn_cancel_rx: watch::Receiver<u64>,
     ) -> Self {
         Dispatcher {
             outbound_manager,
             router,
             dns_client,
             stat_manager,
+            conn_cancel_rx,
         }
     }
 
@@ -310,31 +315,46 @@ impl Dispatcher {
                     .await
                     .stat_stream(rhs, sess.clone());
 
-                match common::io::copy_buf_bidirectional_with_timeout(
-                    &mut lhs,
-                    &mut rhs,
-                    *option::LINK_BUFFER_SIZE * 1024,
-                    Duration::from_secs(*option::TCP_UPLINK_TIMEOUT),
-                    Duration::from_secs(*option::TCP_DOWNLINK_TIMEOUT),
-                )
-                .await
-                {
-                    Ok((up_count, down_count)) => {
-                        debug!(
-                            "tcp link {} <-> {} done, ({}, {}) bytes transferred [{}]",
-                            &sess.source,
-                            &sess.destination,
-                            up_count,
-                            down_count,
-                            &h.tag(),
-                        );
+                // Clone the cancellation receiver so this connection can be
+                // interrupted when close_connections() is called (e.g. after
+                // a proxy node switch).
+                let mut cancel_rx = self.conn_cancel_rx.clone();
+
+                tokio::select! {
+                    result = common::io::copy_buf_bidirectional_with_timeout(
+                        &mut lhs,
+                        &mut rhs,
+                        *option::LINK_BUFFER_SIZE * 1024,
+                        Duration::from_secs(*option::TCP_UPLINK_TIMEOUT),
+                        Duration::from_secs(*option::TCP_DOWNLINK_TIMEOUT),
+                    ) => {
+                        match result {
+                            Ok((up_count, down_count)) => {
+                                debug!(
+                                    "tcp link {} <-> {} done, ({}, {}) bytes transferred [{}]",
+                                    &sess.source,
+                                    &sess.destination,
+                                    up_count,
+                                    down_count,
+                                    &h.tag(),
+                                );
+                            }
+                            Err(e) => {
+                                debug!(
+                                    "tcp link {} <-> {} error: {} [{}]",
+                                    &sess.source,
+                                    &sess.destination,
+                                    e,
+                                    &h.tag()
+                                );
+                            }
+                        }
                     }
-                    Err(e) => {
+                    _ = cancel_rx.changed() => {
                         debug!(
-                            "tcp link {} <-> {} error: {} [{}]",
+                            "tcp link {} <-> {} cancelled (proxy switch) [{}]",
                             &sess.source,
                             &sess.destination,
-                            e,
                             &h.tag()
                         );
                     }
