@@ -9,7 +9,13 @@ use super::{geosite, internal};
 
 pub fn load_file_or_default(filter: &str, default: &str) -> Result<(String, String)> {
     let parts: Vec<&str> = filter.split(':').collect();
-    let (file, code) = if parts.len() == 3 {
+    let (file, code) = if parts.len() == 2 {
+        // "mmdb:cn" — use ASSET_LOCATION/default
+        let asset_loc = Path::new(&*crate::option::ASSET_LOCATION);
+        let path = asset_loc.join(default).to_string_lossy().to_string();
+        (path, parts[1].to_string())
+    } else if parts.len() == 3 {
+        // "mmdb:/path/file:cn" — absolute or relative path
         let path = if Path::new(parts[1]).is_absolute() {
             parts[1].to_string()
         } else {
@@ -17,10 +23,14 @@ pub fn load_file_or_default(filter: &str, default: &str) -> Result<(String, Stri
             asset_loc.join(parts[1]).to_string_lossy().to_string()
         };
         (path, parts[2].to_string())
-    } else if parts.len() == 2 {
-        let asset_loc = Path::new(&*crate::option::ASSET_LOCATION);
-        let path = asset_loc.join(default).to_string_lossy().to_string();
-        (path, parts[1].to_string())
+    } else if parts.len() == 4
+        && parts[1].len() == 1
+        && parts[1].chars().next().unwrap().is_ascii_alphabetic()
+    {
+        // "mmdb:C:\path\file:cn" — Windows drive letter splits into 4 parts
+        // Reconstruct: parts[1] + ":" + parts[2] = "C:\path\file", parts[3] = code
+        let path = format!("{}:{}", parts[1], parts[2]);
+        (path, parts[3].to_string())
     } else {
         return Err(anyhow!("invalid external rule: {}", filter));
     };

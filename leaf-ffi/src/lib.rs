@@ -548,6 +548,25 @@ pub unsafe extern "C" fn leaf_get_stats(
     }
 }
 
+/// Sets a process environment variable visible to the leaf runtime.
+///
+/// Must be called BEFORE leaf_run* — leaf reads ASSET_LOCATION lazily on
+/// first access (lazy_static) and caches it for the process lifetime.
+///
+/// Primary use: set ASSET_LOCATION so leaf can find geo.mmdb for GeoIP rules.
+///
+/// @param key   NUL-terminated UTF-8 env var name  (e.g. "ASSET_LOCATION").
+/// @param value NUL-terminated UTF-8 env var value (e.g. "/data/data/com.app/files/leaf").
+#[no_mangle]
+pub unsafe extern "C" fn leaf_set_env(key: *const c_char, value: *const c_char) {
+    if let (Ok(k), Ok(v)) = (
+        CStr::from_ptr(key).to_str(),
+        CStr::from_ptr(value).to_str(),
+    ) {
+        std::env::set_var(k, v);
+    }
+}
+
 /// Frees a C string that was allocated by leaf FFI functions.
 /// Currently unused but reserved for future use if we switch to
 /// returning allocated strings.
