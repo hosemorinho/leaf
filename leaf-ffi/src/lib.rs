@@ -138,6 +138,48 @@ pub unsafe extern "C" fn leaf_run_with_config_string(rt_id: u16, config: *const 
     }
 }
 
+/// Starts leaf with options using a config string instead of a file path.
+/// Same as leaf_run_with_options but config is passed as a JSON string
+/// in memory — no config file touches disk.
+#[no_mangle]
+pub unsafe extern "C" fn leaf_run_with_options_config_string(
+    rt_id: u16,
+    config: *const c_char,
+    multi_thread: bool,
+    auto_threads: bool,
+    threads: i32,
+    stack_size: i32,
+) -> i32 {
+    let config_str = match unsafe { CStr::from_ptr(config).to_str() } {
+        Ok(s) => s.to_string(),
+        Err(_) => return ERR_CONFIG,
+    };
+    if let Err(e) = leaf::util::run_with_options_config_string(
+        rt_id,
+        config_str,
+        multi_thread,
+        auto_threads,
+        threads as usize,
+        stack_size as usize,
+    ) {
+        return to_errno(e);
+    }
+    ERR_OK
+}
+
+/// Tests config from a JSON string (no file needed).
+#[no_mangle]
+pub unsafe extern "C" fn leaf_test_config_string(config: *const c_char) -> i32 {
+    let config_str = match unsafe { CStr::from_ptr(config).to_str() } {
+        Ok(s) => s,
+        Err(_) => return ERR_CONFIG,
+    };
+    if let Err(e) = leaf::test_config_string(config_str) {
+        return to_errno(e);
+    }
+    ERR_OK
+}
+
 /// Reloads DNS servers, outbounds and routing rules from the config file.
 ///
 /// @param rt_id The ID of the leaf instance to reload.

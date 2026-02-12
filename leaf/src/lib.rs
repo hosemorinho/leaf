@@ -406,6 +406,12 @@ pub fn test_config(config_path: &str) -> Result<(), Error> {
         .map_err(Error::Config)
 }
 
+pub fn test_config_string(config: &str) -> Result<(), Error> {
+    config::from_string(config)
+        .map(|_| ())
+        .map_err(Error::Config)
+}
+
 fn new_runtime(opt: &RuntimeOption) -> Result<tokio::runtime::Runtime, Error> {
     match opt {
         RuntimeOption::SingleThread => tokio::runtime::Builder::new_current_thread()

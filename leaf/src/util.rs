@@ -68,6 +68,46 @@ pub fn run_with_options(
     crate::start(rt_id, opts)
 }
 
+fn get_start_options_config_string(
+    config: String,
+    multi_thread: bool,
+    auto_threads: bool,
+    threads: usize,
+    stack_size: usize,
+) -> crate::StartOptions {
+    let runtime_opt = if !multi_thread {
+        crate::RuntimeOption::SingleThread
+    } else if auto_threads {
+        crate::RuntimeOption::MultiThreadAuto(stack_size)
+    } else {
+        crate::RuntimeOption::MultiThread(threads, stack_size)
+    };
+    crate::StartOptions {
+        config: crate::Config::Str(config),
+        #[cfg(feature = "auto-reload")]
+        auto_reload: false,
+        runtime_opt,
+    }
+}
+
+pub fn run_with_options_config_string(
+    rt_id: crate::RuntimeId,
+    config: String,
+    multi_thread: bool,
+    auto_threads: bool,
+    threads: usize,
+    stack_size: usize,
+) -> Result<(), crate::Error> {
+    let opts = get_start_options_config_string(
+        config,
+        multi_thread,
+        auto_threads,
+        threads,
+        stack_size,
+    );
+    crate::start(rt_id, opts)
+}
+
 async fn test_tcp_outbound(
     dns_client: SyncDnsClient,
     handler: AnyOutboundHandler,
