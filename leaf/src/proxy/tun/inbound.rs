@@ -3,14 +3,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
+use bytes::Bytes;
 use futures::{sink::SinkExt, stream::StreamExt};
 use protobuf::Message;
 use tokio::sync::mpsc::channel as tokio_channel;
 use tokio::sync::mpsc::{Receiver as TokioReceiver, Sender as TokioSender};
 use tracing::{debug, error, info, warn};
-
-#[cfg(target_os = "windows")]
-use std::path::PathBuf;
 
 use crate::{
     app::dispatcher::Dispatcher,
@@ -167,67 +165,65 @@ pub fn new(
 ) -> Result<Runner> {
     let settings = TunInboundSettings::parse_from_bytes(&inbound.settings)?;
 
-    let empty = String::new();
+    let empty_name = String::new();
     info!("TUN inbound: configuring (fd={}, auto={}, name={:?})",
         settings.fd, settings.auto,
-        if settings.fd < 0 && !settings.auto { &settings.name } else { &empty });
+        if settings.fd < 0 && !settings.auto { &settings.name } else { &empty_name });
 
-    let mut cfg = tun::Configuration::default();
-    if settings.fd >= 0 {
-        info!("TUN inbound: using raw fd={}", settings.fd);
-        cfg.raw_fd(settings.fd);
+    let tun = if settings.fd >= 0 {
+        // Android/iOS: use raw fd from VPN service
+        info!("TUN inbound: creating device from raw fd={}", settings.fd);
+        #[cfg(target_family = "unix")]
+        {
+            unsafe { tun_rs::AsyncDevice::from_fd(settings.fd as _) }.map_err(|e| {
+                error!("TUN inbound: from_fd({}) FAILED: {}", settings.fd, e);
+                anyhow!("create tun from fd {} failed: {}", settings.fd, e)
+            })?
+        }
+        #[cfg(not(target_family = "unix"))]
+        {
+            return Err(anyhow!("tun fd is only supported on Unix-like systems"));
+        }
     } else if settings.auto {
-        info!("TUN inbound: auto mode — name={}, addr={}, gw={}, mtu=1500",
-            &*option::DEFAULT_TUN_NAME, &*option::DEFAULT_TUN_IPV4_ADDR, &*option::DEFAULT_TUN_IPV4_GW);
-        cfg.tun_name(&*option::DEFAULT_TUN_NAME)
-            .address(&*option::DEFAULT_TUN_IPV4_ADDR)
-            .destination(&*option::DEFAULT_TUN_IPV4_GW)
-            .mtu(1500);
-
-        #[cfg(not(any(target_arch = "mips", target_arch = "mips64")))]
-        {
-            cfg.netmask(&*option::DEFAULT_TUN_IPV4_MASK);
-        }
-
-        cfg.up();
+        info!("TUN inbound: auto mode — name={}, addr={}/{}, gw={}, mtu=1500",
+            &*option::DEFAULT_TUN_NAME, &*option::DEFAULT_TUN_IPV4_ADDR,
+            &*option::DEFAULT_TUN_IPV4_MASK, &*option::DEFAULT_TUN_IPV4_GW);
+        let dev = tun_rs::DeviceBuilder::new()
+            .name(&*option::DEFAULT_TUN_NAME)
+            .mtu(1500)
+            .ipv4(
+                (*option::DEFAULT_TUN_IPV4_ADDR).clone(),
+                (*option::DEFAULT_TUN_IPV4_MASK).clone(),
+                Some((*option::DEFAULT_TUN_IPV4_GW).clone()),
+            )
+            .build_async()
+            .map_err(|e| {
+                error!("TUN inbound: build_async (auto) FAILED: {}", e);
+                anyhow!("create tun (auto) failed: {}. On Windows: ensure wintun.dll is \
+                         next to the executable and the app is running as Administrator.", e)
+            })?;
+        info!("TUN inbound: auto mode device created successfully");
+        dev
     } else {
-        info!("TUN inbound: manual mode — name={}, addr={}, gw={}, mtu={}",
-            &settings.name, &settings.address, &settings.gateway, settings.mtu);
-        cfg.tun_name(settings.name)
-            .address(settings.address)
-            .destination(settings.gateway)
-            .mtu(settings.mtu as u16);
+        info!("TUN inbound: manual mode — name={}, addr={}/{}, gw={}, mtu={}",
+            &settings.name, &settings.address, &settings.netmask,
+            &settings.gateway, settings.mtu);
+        let dev = tun_rs::DeviceBuilder::new()
+            .name(&settings.name)
+            .mtu(settings.mtu as u16)
+            .ipv4(settings.address.clone(), settings.netmask.clone(), Some(settings.gateway.clone()))
+            .build_async()
+            .map_err(|e| {
+                error!("TUN inbound: build_async (manual) FAILED: {}", e);
+                anyhow!("create tun (manual) failed: {}. On Windows: ensure wintun.dll is \
+                         next to the executable and the app is running as Administrator.", e)
+            })?;
+        info!("TUN inbound: manual mode device created successfully");
+        dev
+    };
 
-        #[cfg(not(any(target_arch = "mips", target_arch = "mips64")))]
-        {
-            cfg.netmask(settings.netmask);
-        }
-
-        cfg.up();
-    }
-
-    // Windows: configure wintun.dll path relative to ASSET_LOCATION or exe dir.
-    // By default the `tun` crate looks for "wintun.dll" relative to CWD which
-    // may differ from the exe directory in Flutter apps. We resolve it to an
-    // absolute path next to the executable (or in ASSET_LOCATION).
-    #[cfg(target_os = "windows")]
-    {
-        let wintun_path = find_wintun_dll();
-        info!("TUN inbound: wintun.dll resolved to {:?}", wintun_path);
-        if let Some(path) = &wintun_path {
-            if !path.exists() {
-                error!("TUN inbound: wintun.dll NOT FOUND at {:?}", path);
-                return Err(anyhow!(
-                    "wintun.dll not found at {:?}. Download from https://www.wintun.net/ \
-                     and place next to the executable.", path
-                ));
-            }
-            cfg.platform_config(|c| {
-                c.wintun_file(path);
-            });
-        } else {
-            warn!("TUN inbound: could not determine exe directory, using default wintun.dll path");
-        }
+    if settings.auto {
+        assert!(settings.fd == -1, "tun-auto is not compatible with tun-fd");
     }
 
     // FIXME it's a bad design to have 2 lists in config while we need only one
@@ -245,18 +241,6 @@ pub fn new(
     };
     let fakedns = Arc::new(FakeDns::new(fake_dns_mode, fake_dns_filters));
 
-    info!("TUN inbound: creating async TUN device...");
-    let tun = tun::create_as_async(&cfg).map_err(|e| {
-        error!("TUN inbound: create_as_async FAILED: {}", e);
-        anyhow!("create tun failed: {}. On Windows: ensure wintun.dll is next to the \
-                 executable and the app is running as Administrator.", e)
-    })?;
-    info!("TUN inbound: async TUN device created successfully");
-
-    if settings.auto {
-        assert!(settings.fd == -1, "tun-auto is not compatible with tun-fd");
-    }
-
     let (stack, mut tcp_listener, udp_socket) = netstack::NetStack::with_buffer_size(
         *crate::option::NETSTACK_OUTPUT_CHANNEL_SIZE,
         *crate::option::NETSTACK_UDP_UPLINK_CHANNEL_SIZE,
@@ -264,50 +248,53 @@ pub fn new(
 
     Ok(Box::pin(async move {
         let inbound_tag = inbound.tag.clone();
-        let framed = tun.into_framed();
-        let (mut tun_sink, mut tun_stream) = framed.split();
+
+        let framed = tun_rs::async_framed::DeviceFramed::new(
+            tun,
+            tun_rs::async_framed::BytesCodec::new(),
+        );
+        let (mut tun_sink, mut tun_stream) = framed.split::<Bytes>();
         let (mut stack_sink, mut stack_stream) = stack.split();
 
         let mut futs: Vec<Runner> = Vec::new();
 
-        // Reads packet from stack and sends to TUN.
+        // netstack → TUN: read packets from stack, send to TUN device
         futs.push(Box::pin(async move {
             while let Some(pkt) = stack_stream.next().await {
                 match pkt {
                     Ok(pkt) => {
-                        if let Err(e) = tun_sink.send(pkt).await {
-                            // TODO Return the error
+                        if let Err(e) = tun_sink.send(Bytes::from(pkt)).await {
                             error!("Sending packet to TUN failed: {}", e);
                             return;
                         }
                     }
                     Err(e) => {
-                        error!("Net stack erorr: {}", e);
+                        error!("NetStack error: {}", e);
                         return;
                     }
                 }
             }
         }));
 
-        // Reads packet from TUN and sends to stack.
+        // TUN → netstack: read packets from TUN device, send to stack
         futs.push(Box::pin(async move {
             while let Some(pkt) = tun_stream.next().await {
                 match pkt {
                     Ok(pkt) => {
-                        if let Err(e) = stack_sink.send(pkt).await {
+                        if let Err(e) = stack_sink.send(pkt.into()).await {
                             error!("Sending packet to NetStack failed: {}", e);
                             return;
                         }
                     }
                     Err(e) => {
-                        error!("TUN error: {}", e);
+                        error!("TUN read error: {}", e);
                         return;
                     }
                 }
             }
         }));
 
-        // Extracts TCP connections from stack and sends them to the dispatcher.
+        // TCP: extract connections from stack and dispatch
         let inbound_tag_cloned = inbound_tag.clone();
         let fakedns_cloned = fakedns.clone();
         futs.push(Box::pin(async move {
@@ -323,8 +310,7 @@ pub fn new(
             }
         }));
 
-        // Receive and send UDP packets between netstack and NAT manager. The NAT
-        // manager would maintain UDP sessions and send them to the dispatcher.
+        // UDP: handle datagrams via NAT manager
         futs.push(Box::pin(async move {
             handle_inbound_datagram(udp_socket, inbound_tag, nat_manager, fakedns.clone()).await;
         }));
@@ -332,33 +318,4 @@ pub fn new(
         info!("start tun inbound");
         futures::future::select_all(futs).await;
     }))
-}
-
-#[cfg(target_os = "windows")]
-fn find_wintun_dll() -> Option<PathBuf> {
-    let asset_loc = std::path::Path::new(&*option::ASSET_LOCATION);
-    let in_assets = asset_loc.join("wintun.dll");
-    if in_assets.exists() {
-        return Some(in_assets);
-    }
-
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            let next_to_exe = exe_dir.join("wintun.dll");
-            if next_to_exe.exists() {
-                return Some(next_to_exe);
-            }
-            info!("TUN: wintun.dll not at {:?}", next_to_exe);
-        }
-    }
-
-    let cwd = std::env::current_dir().ok()?;
-    let in_cwd = cwd.join("wintun.dll");
-    if in_cwd.exists() {
-        return Some(in_cwd);
-    }
-
-    info!("TUN: wintun.dll not found in ASSET_LOCATION({:?}), exe dir, or CWD({:?})",
-        asset_loc, cwd);
-    None
 }

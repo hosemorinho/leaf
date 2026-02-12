@@ -131,7 +131,7 @@ inbound-socks = []
 inbound-http = ["http"]
 inbound-mixed = ["http"]
 inbound-hc = []
-inbound-tun = ["tun", "netstack-lwip", "pnet_datalink"]
+inbound-tun = ["tun-rs", "netstack-lwip", "pnet_datalink"]
 inbound-ws = ["tungstenite", "tokio-tungstenite", "url", "http"]
 inbound-amux = ["tokio-util"]
 inbound-quic = ["rustls", "rustls-pemfile-old"]
@@ -260,7 +260,7 @@ axum = { version = "0.7", default-features = false, features = ["http1", "tokio"
 notify = { version = "6", optional = true }
 
 # TUN
-tun = { version = "0.7", features = ["async"], optional = true  }
+tun-rs = { version = "2", features = ["async", "async_framed"], optional = true }
 netstack-lwip = { git = "https://github.com/eycorsican/netstack-lwip", rev = "4cc3162", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
