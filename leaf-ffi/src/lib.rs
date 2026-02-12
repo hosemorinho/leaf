@@ -151,6 +151,19 @@ pub extern "C" fn leaf_reload(rt_id: u16) -> i32 {
     ERR_OK
 }
 
+/// Reloads from a JSON config string instead of reading the config file.
+#[no_mangle]
+pub unsafe extern "C" fn leaf_reload_with_config_string(rt_id: u16, config: *const c_char) -> i32 {
+    let config_str = match unsafe { CStr::from_ptr(config).to_str() } {
+        Ok(s) => s.to_owned(),
+        Err(_) => return ERR_CONFIG,
+    };
+    if let Err(e) = leaf::reload_with_config_string(rt_id, config_str) {
+        return to_errno(e);
+    }
+    ERR_OK
+}
+
 /// Shuts down leaf.
 ///
 /// @param rt_id The ID of the leaf instance to reload.

@@ -81,6 +81,9 @@ pub struct RuntimeManager {
     stat_manager: SyncStatManager,
     #[cfg(feature = "auto-reload")]
     watcher: Mutex<Option<RecommendedWatcher>>,
+    /// Pending config string for reload_with_config_string.
+    /// Set before signaling reload; consumed by the async reload handler.
+    pending_config: Mutex<Option<String>>,
 }
 
 impl RuntimeManager {
@@ -110,6 +113,7 @@ impl RuntimeManager {
             stat_manager,
             #[cfg(feature = "auto-reload")]
             watcher: Mutex::new(None),
+            pending_config: Mutex::new(None),
         })
     }
 
@@ -219,13 +223,19 @@ impl RuntimeManager {
     // TODO Reload FakeDns. And perhaps the inbounds as long as the listening
     // addresses haven't changed.
     pub async fn reload(&self) -> Result<(), Error> {
-        let config_path = if let Some(p) = self.config_path.as_ref() {
-            p
+        let pending = self.pending_config.lock().unwrap().take();
+        let mut config = if let Some(config_str) = pending {
+            info!("reloading from config string ({} bytes)", config_str.len());
+            config::from_string(&config_str).map_err(Error::Config)?
         } else {
-            return Err(Error::NoConfigFile);
+            let config_path = if let Some(p) = self.config_path.as_ref() {
+                p
+            } else {
+                return Err(Error::NoConfigFile);
+            };
+            info!("reloading from config file: {}", config_path);
+            config::from_file(config_path).map_err(Error::Config)?
         };
-        info!("reloading from config file: {}", config_path);
-        let mut config = config::from_file(config_path).map_err(Error::Config)?;
         app::logger::setup_logger(&config.log)?;
         self.router.write().await.reload(&mut config.router)?;
         self.dns_client.write().await.reload(&config.dns)?;
@@ -234,7 +244,7 @@ impl RuntimeManager {
             .await
             .reload(&config.outbounds, self.dns_client.clone())
             .await?;
-        info!("reloaded from config file: {}", config_path);
+        info!("reload complete");
         Ok(())
     }
 
@@ -248,6 +258,11 @@ impl RuntimeManager {
             Ok(res) => res,
             Err(e) => Err(Error::SyncChannelRecv(e)),
         }
+    }
+
+    pub fn blocking_reload_with_config(&self, config: String) -> Result<(), Error> {
+        *self.pending_config.lock().unwrap() = Some(config);
+        self.blocking_reload()
     }
 
     pub async fn shutdown(&self) -> bool {
@@ -359,6 +374,17 @@ pub fn reload(key: RuntimeId) -> Result<(), Error> {
         .get(&key)
     {
         return m.blocking_reload();
+    }
+    Err(Error::RuntimeManager)
+}
+
+pub fn reload_with_config_string(key: RuntimeId, config: String) -> Result<(), Error> {
+    if let Some(m) = RUNTIME_MANAGER
+        .lock()
+        .map_err(|_| Error::RuntimeManager)?
+        .get(&key)
+    {
+        return m.blocking_reload_with_config(config);
     }
     Err(Error::RuntimeManager)
 }
