@@ -167,9 +167,10 @@ pub fn new(
 ) -> Result<Runner> {
     let settings = TunInboundSettings::parse_from_bytes(&inbound.settings)?;
 
+    let empty = String::new();
     info!("TUN inbound: configuring (fd={}, auto={}, name={:?})",
         settings.fd, settings.auto,
-        if settings.fd < 0 && !settings.auto { &settings.name } else { &String::new() });
+        if settings.fd < 0 && !settings.auto { &settings.name } else { &empty });
 
     let mut cfg = tun::Configuration::default();
     if settings.fd >= 0 {
