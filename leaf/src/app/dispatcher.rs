@@ -318,7 +318,11 @@ impl Dispatcher {
                 // Clone the cancellation receiver so this connection can be
                 // interrupted when close_connections() is called (e.g. after
                 // a proxy node switch).
+                // borrow_and_update() marks the current value as "seen" so that
+                // changed() only fires on FUTURE sends, not on values that were
+                // already set before this connection was created.
                 let mut cancel_rx = self.conn_cancel_rx.clone();
+                cancel_rx.borrow_and_update();
 
                 tokio::select! {
                     result = common::io::copy_buf_bidirectional_with_timeout(
