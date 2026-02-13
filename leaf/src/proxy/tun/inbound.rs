@@ -188,38 +188,59 @@ pub fn new(
         info!("TUN inbound: auto mode — name={}, addr={}/{}, gw={}, mtu=1500",
             &*option::DEFAULT_TUN_NAME, &*option::DEFAULT_TUN_IPV4_ADDR,
             &*option::DEFAULT_TUN_IPV4_MASK, &*option::DEFAULT_TUN_IPV4_GW);
-        let dev = tun_rs::DeviceBuilder::new()
-            .name(&*option::DEFAULT_TUN_NAME)
-            .mtu(1500)
-            .ipv4(
-                (*option::DEFAULT_TUN_IPV4_ADDR).clone(),
-                (*option::DEFAULT_TUN_IPV4_MASK).clone(),
-                Some((*option::DEFAULT_TUN_IPV4_GW).clone()),
-            )
-            .build_async()
-            .map_err(|e| {
-                error!("TUN inbound: build_async (auto) FAILED: {}", e);
-                anyhow!("create tun (auto) failed: {}. On Windows: ensure wintun.dll is \
-                         next to the executable and the app is running as Administrator.", e)
-            })?;
-        info!("TUN inbound: auto mode device created successfully");
-        dev
+        // DeviceBuilder is only available on desktop platforms (not Android/iOS)
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        {
+            let dev = tun_rs::DeviceBuilder::new()
+                .name(&*option::DEFAULT_TUN_NAME)
+                .mtu(1500)
+                .ipv4(
+                    (*option::DEFAULT_TUN_IPV4_ADDR).clone(),
+                    (*option::DEFAULT_TUN_IPV4_MASK).clone(),
+                    Some((*option::DEFAULT_TUN_IPV4_GW).clone()),
+                )
+                .build_async()
+                .map_err(|e| {
+                    error!("TUN inbound: build_async (auto) FAILED: {}", e);
+                    anyhow!("create tun (auto) failed: {}. On Windows: ensure wintun.dll is \
+                             next to the executable and the app is running as Administrator.", e)
+                })?;
+            info!("TUN inbound: auto mode device created successfully");
+            dev
+        }
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        {
+            return Err(anyhow!(
+                "TUN auto mode is not supported on mobile platforms. \
+                 Provide a TUN file descriptor from the VPN service instead."
+            ));
+        }
     } else {
         info!("TUN inbound: manual mode — name={}, addr={}/{}, gw={}, mtu={}",
             &settings.name, &settings.address, &settings.netmask,
             &settings.gateway, settings.mtu);
-        let dev = tun_rs::DeviceBuilder::new()
-            .name(&settings.name)
-            .mtu(settings.mtu as u16)
-            .ipv4(settings.address.clone(), settings.netmask.clone(), Some(settings.gateway.clone()))
-            .build_async()
-            .map_err(|e| {
-                error!("TUN inbound: build_async (manual) FAILED: {}", e);
-                anyhow!("create tun (manual) failed: {}. On Windows: ensure wintun.dll is \
-                         next to the executable and the app is running as Administrator.", e)
-            })?;
-        info!("TUN inbound: manual mode device created successfully");
-        dev
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        {
+            let dev = tun_rs::DeviceBuilder::new()
+                .name(&settings.name)
+                .mtu(settings.mtu as u16)
+                .ipv4(settings.address.clone(), settings.netmask.clone(), Some(settings.gateway.clone()))
+                .build_async()
+                .map_err(|e| {
+                    error!("TUN inbound: build_async (manual) FAILED: {}", e);
+                    anyhow!("create tun (manual) failed: {}. On Windows: ensure wintun.dll is \
+                             next to the executable and the app is running as Administrator.", e)
+                })?;
+            info!("TUN inbound: manual mode device created successfully");
+            dev
+        }
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        {
+            return Err(anyhow!(
+                "TUN manual mode is not supported on mobile platforms. \
+                 Provide a TUN file descriptor from the VPN service instead."
+            ));
+        }
     };
 
     if settings.auto {
