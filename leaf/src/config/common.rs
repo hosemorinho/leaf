@@ -486,7 +486,8 @@ pub fn to_internal(mut config: Config) -> Result<internal::Config> {
                     target_os = "ios",
                     target_os = "android",
                     target_os = "macos",
-                    target_os = "linux"
+                    target_os = "linux",
+                    target_os = "windows"
                 ))]
                 InboundSettings::Tun {
                     settings: ext_settings,
@@ -549,7 +550,8 @@ pub fn to_internal(mut config: Config) -> Result<internal::Config> {
                     target_os = "ios",
                     target_os = "android",
                     target_os = "macos",
-                    target_os = "linux"
+                    target_os = "linux",
+                    target_os = "windows"
                 )))]
                 InboundSettings::Tun { .. } => {
                     return Err(anyhow::anyhow!(
