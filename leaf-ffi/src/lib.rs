@@ -676,7 +676,7 @@ pub unsafe extern "system" fn JNI_OnUnload(_vm: JavaVM, _: *mut std::os::raw::c_
 #[no_mangle]
 pub unsafe extern "system" fn Java_com_follow_clash_core_LeafBridge_nativeSetProtectSocketCallback(
     mut env: JNIEnv,
-    receiver: JObject,
+    receiver: JClass,
 ) {
     // If libleaf was loaded first via Dart FFI (dlopen), JNI_OnLoad may not
     // run. Refresh JVM here so protect callback can always attach threads.
