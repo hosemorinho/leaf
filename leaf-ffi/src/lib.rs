@@ -5,7 +5,7 @@ use std::{
 };
 
 #[cfg(target_os = "android")]
-use jni::objects::{GlobalRef, JClass, JString};
+use jni::objects::{GlobalRef, JClass, JObject, JString};
 #[cfg(target_os = "android")]
 use jni::sys::{jboolean, jint, JNI_VERSION_1_6};
 #[cfg(target_os = "android")]
@@ -676,7 +676,7 @@ pub unsafe extern "system" fn JNI_OnUnload(_vm: JavaVM, _: *mut std::os::raw::c_
 #[no_mangle]
 pub unsafe extern "system" fn Java_com_follow_clash_core_LeafBridge_nativeSetProtectSocketCallback(
     mut env: JNIEnv,
-    receiver: JClass,
+    receiver: JObject,
 ) {
     // If libleaf was loaded first via Dart FFI (dlopen), JNI_OnLoad may not
     // run. Refresh JVM here so protect callback can always attach threads.
@@ -684,10 +684,24 @@ pub unsafe extern "system" fn Java_com_follow_clash_core_LeafBridge_nativeSetPro
         leaf::mobile::callback::android::set_jvm(vm);
     }
 
-    // LeafBridge.nativeSetProtectSocketCallback() is declared on a Kotlin
-    // `object`, so JNI passes the singleton instance here. Keep a global ref
-    // to this receiver and invoke `protectSocket(Int): Boolean` via call_method.
-    if let Ok(receiver_g) = env.new_global_ref(receiver) {
+    // Always register the Kotlin object singleton instance as callback target.
+    // On some build/tooling combinations JNI may provide a class-like receiver
+    // for `object` methods; using INSTANCE avoids class-vs-instance mismatch.
+    let receiver_obj = env
+        .find_class("com/follow/clash/core/LeafBridge")
+        .ok()
+        .and_then(|cls| {
+            env.get_static_field(
+                &cls,
+                "INSTANCE",
+                "Lcom/follow/clash/core/LeafBridge;",
+            )
+            .ok()
+            .and_then(|value| value.l().ok())
+        })
+        .unwrap_or(receiver);
+
+    if let Ok(receiver_g) = env.new_global_ref(receiver_obj) {
         leaf::mobile::callback::android::set_protect_socket_callback(
             receiver_g,
             "protectSocket".to_string(),
