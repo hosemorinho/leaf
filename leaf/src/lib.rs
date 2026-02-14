@@ -439,23 +439,36 @@ pub fn test_config_string(config: &str) -> Result<(), Error> {
 }
 
 fn new_runtime(opt: &RuntimeOption) -> Result<tokio::runtime::Runtime, Error> {
+    // If stack size is 0, keep Tokio/OS defaults.
+    // Passing 0 to thread_stack_size() can produce tiny worker stacks on some
+    // Android environments, which may crash when ART attaches JNI threads.
+    fn normalize_stack_size(stack_size: usize) -> Option<usize> {
+        if stack_size == 0 {
+            return None;
+        }
+        // Keep a conservative floor for JNI-heavy worker threads.
+        Some(stack_size.max(512 * 1024))
+    }
+
     match opt {
         RuntimeOption::SingleThread => tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(Error::Io),
-        RuntimeOption::MultiThreadAuto(stack_size) => tokio::runtime::Builder::new_multi_thread()
-            .thread_stack_size(*stack_size)
-            .enable_all()
-            .build()
-            .map_err(Error::Io),
+        RuntimeOption::MultiThreadAuto(stack_size) => {
+            let mut builder = tokio::runtime::Builder::new_multi_thread();
+            if let Some(size) = normalize_stack_size(*stack_size) {
+                builder.thread_stack_size(size);
+            }
+            builder.enable_all().build().map_err(Error::Io)
+        }
         RuntimeOption::MultiThread(worker_threads, stack_size) => {
-            tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(*worker_threads)
-                .thread_stack_size(*stack_size)
-                .enable_all()
-                .build()
-                .map_err(Error::Io)
+            let mut builder = tokio::runtime::Builder::new_multi_thread();
+            builder.worker_threads(*worker_threads);
+            if let Some(size) = normalize_stack_size(*stack_size) {
+                builder.thread_stack_size(size);
+            }
+            builder.enable_all().build().map_err(Error::Io)
         }
     }
 }
