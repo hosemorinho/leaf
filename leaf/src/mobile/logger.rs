@@ -9,7 +9,7 @@ use bytes::BytesMut;
 use super::bindings::{asl_log, ASL_LEVEL_NOTICE};
 
 #[cfg(target_os = "android")]
-use super::bindings::{__android_log_print, android_LogPriority_ANDROID_LOG_VERBOSE};
+use super::bindings::{__android_log_write, android_LogPriority_ANDROID_LOG_VERBOSE};
 
 #[cfg(any(target_os = "ios", target_os = "macos"))]
 fn log_out(data: &[u8]) {
@@ -38,7 +38,7 @@ fn log_out(data: &[u8]) {
             Err(_) => return,
         };
         let tag = ffi::CString::new("leaf").unwrap();
-        let _ = __android_log_print(
+        let _ = __android_log_write(
             android_LogPriority_ANDROID_LOG_VERBOSE as std::os::raw::c_int,
             tag.as_c_str().as_ptr(),
             s.as_c_str().as_ptr(),
