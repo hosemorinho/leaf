@@ -12,6 +12,7 @@ crate-type = ["staticlib", "dylib"]
 [features]
 default = [
     "default-ring",
+    "outbound-select",
 ]
 
 default-aws-lc= [
@@ -27,7 +28,9 @@ default-openssl = [
 ]
 
 auto-reload = ["leaf/auto-reload"]
+outbound-select = ["leaf/outbound-select"]
 
 [dependencies]
 leaf = { path = "../leaf", default-features = false, optional = true }
 tokio = { version = "1", features = ["rt"] }
+serde_json = "1.0"

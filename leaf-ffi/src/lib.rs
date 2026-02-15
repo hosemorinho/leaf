@@ -1,5 +1,5 @@
 #![allow(clippy::missing_safety_doc)]
-use std::{ffi::CStr, os::raw::c_char};
+use std::{ffi::CStr, os::raw::c_char, ptr};
 
 /// No error.
 pub const ERR_OK: i32 = 0;
@@ -33,6 +33,41 @@ fn to_errno(e: leaf::Error) -> i32 {
         leaf::Error::SyncChannelRecv(..) => ERR_SYNC_CHANNEL_RECV,
         leaf::Error::RuntimeManager => ERR_RUNTIME_MANAGER,
     }
+}
+
+fn to_runtime_opt(
+    multi_thread: bool,
+    auto_threads: bool,
+    threads: i32,
+    stack_size: i32,
+) -> leaf::RuntimeOption {
+    if !multi_thread {
+        return leaf::RuntimeOption::SingleThread;
+    }
+    if auto_threads {
+        return leaf::RuntimeOption::MultiThreadAuto(stack_size as usize);
+    }
+    leaf::RuntimeOption::MultiThread(threads as usize, stack_size as usize)
+}
+
+fn write_bytes_to_buf(bytes: &[u8], buf: *mut c_char, buf_len: i32) -> i32 {
+    if buf.is_null() || buf_len <= 0 {
+        return ERR_CONFIG_PATH;
+    }
+    // Need one extra byte for NUL terminator.
+    let required = bytes.len() + 1;
+    if required > buf_len as usize {
+        return -(required as i32);
+    }
+    unsafe {
+        ptr::copy_nonoverlapping(bytes.as_ptr(), buf.cast::<u8>(), bytes.len());
+        *buf.add(bytes.len()) = 0;
+    }
+    bytes.len() as i32
+}
+
+fn write_string_to_buf(s: &str, buf: *mut c_char, buf_len: i32) -> i32 {
+    write_bytes_to_buf(s.as_bytes(), buf, buf_len)
 }
 
 /// Starts leaf with options, on a successful start this function blocks the current
@@ -128,6 +163,31 @@ pub unsafe extern "C" fn leaf_run_with_config_string(rt_id: u16, config: *const 
     }
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn leaf_run_with_options_config_string(
+    rt_id: u16,
+    config: *const c_char,
+    multi_thread: bool,
+    auto_threads: bool,
+    threads: i32,
+    stack_size: i32,
+) -> i32 {
+    if let Ok(config) = unsafe { CStr::from_ptr(config).to_str() } {
+        let opts = leaf::StartOptions {
+            config: leaf::Config::Str(config.to_string()),
+            #[cfg(feature = "auto-reload")]
+            auto_reload: false,
+            runtime_opt: to_runtime_opt(multi_thread, auto_threads, threads, stack_size),
+        };
+        if let Err(e) = leaf::start(rt_id, opts) {
+            return to_errno(e);
+        }
+        ERR_OK
+    } else {
+        ERR_CONFIG_PATH
+    }
+}
+
 /// Reloads DNS servers, outbounds and routing rules from the config file.
 ///
 /// @param rt_id The ID of the leaf instance to reload.
@@ -141,6 +201,21 @@ pub extern "C" fn leaf_reload(rt_id: u16) -> i32 {
     ERR_OK
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn leaf_reload_with_config_string(
+    rt_id: u16,
+    config: *const c_char,
+) -> i32 {
+    if let Ok(config) = unsafe { CStr::from_ptr(config).to_str() } {
+        if let Err(e) = leaf::reload_with_config_string(rt_id, config) {
+            return to_errno(e);
+        }
+        ERR_OK
+    } else {
+        ERR_CONFIG_PATH
+    }
+}
+
 /// Shuts down leaf.
 ///
 /// @param rt_id The ID of the leaf instance to reload.
@@ -149,6 +224,13 @@ pub extern "C" fn leaf_reload(rt_id: u16) -> i32 {
 #[no_mangle]
 pub extern "C" fn leaf_shutdown(rt_id: u16) -> bool {
     leaf::shutdown(rt_id)
+}
+
+#[no_mangle]
+pub extern "C" fn leaf_close_connections(_rt_id: u16) -> bool {
+    // The current leaf core does not expose a stable API for forcing all
+    // active relays closed from FFI. Keep the symbol for ABI compatibility.
+    false
 }
 
 /// Tests the configuration.
@@ -161,6 +243,18 @@ pub unsafe extern "C" fn leaf_test_config(config_path: *const c_char) -> i32 {
     if let Ok(config_path) = unsafe { CStr::from_ptr(config_path).to_str() } {
         if let Err(e) = leaf::test_config(config_path) {
             return to_errno(e);
+        }
+        ERR_OK
+    } else {
+        ERR_CONFIG_PATH
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn leaf_test_config_string(config: *const c_char) -> i32 {
+    if let Ok(config) = unsafe { CStr::from_ptr(config).to_str() } {
+        if let Err(e) = leaf::config::from_string(config).map(|_| ()) {
+            return to_errno(leaf::Error::Config(e));
         }
         ERR_OK
     } else {
@@ -208,6 +302,65 @@ pub unsafe extern "C" fn leaf_health_check(
     match result {
         Ok((tcp_res, udp_res)) => {
             if tcp_res.is_ok() || udp_res.is_ok() {
+                ERR_OK
+            } else {
+                ERR_IO
+            }
+        }
+        Err(e) => to_errno(e),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn leaf_health_check_with_latency(
+    rt_id: u16,
+    outbound_tag: *const c_char,
+    timeout_ms: u64,
+    tcp_ms: *mut u64,
+    udp_ms: *mut u64,
+) -> i32 {
+    use std::time::Duration;
+
+    if tcp_ms.is_null() || udp_ms.is_null() {
+        return ERR_CONFIG_PATH;
+    }
+
+    let outbound_tag = if let Ok(tag) = unsafe { CStr::from_ptr(outbound_tag).to_str() } {
+        tag.to_string()
+    } else {
+        return ERR_CONFIG_PATH;
+    };
+
+    let manager = leaf::RUNTIME_MANAGER.lock().unwrap().get(&rt_id).cloned();
+    let result = if let Some(m) = manager {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let timeout = if timeout_ms == 0 {
+            None
+        } else {
+            Some(Duration::from_millis(timeout_ms))
+        };
+        rt.block_on(async move { m.health_check_outbound(&outbound_tag, timeout).await })
+    } else {
+        Err(leaf::Error::RuntimeManager)
+    };
+
+    match result {
+        Ok((tcp_res, udp_res)) => {
+            let tcp_ok = tcp_res.is_ok();
+            let udp_ok = udp_res.is_ok();
+            unsafe {
+                *tcp_ms = tcp_res
+                    .as_ref()
+                    .ok()
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                *udp_ms = udp_res
+                    .as_ref()
+                    .ok()
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+            }
+            if tcp_ok || udp_ok {
                 ERR_OK
             } else {
                 ERR_IO
@@ -297,4 +450,179 @@ pub unsafe extern "C" fn leaf_get_since_last_active(
         Ok(None) => ERR_NO_DATA,
         Err(e) => to_errno(e),
     }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn leaf_set_outbound_selected(
+    rt_id: u16,
+    outbound: *const c_char,
+    select: *const c_char,
+) -> i32 {
+    let outbound = if let Ok(v) = unsafe { CStr::from_ptr(outbound).to_str() } {
+        v.to_string()
+    } else {
+        return ERR_CONFIG_PATH;
+    };
+    let select = if let Ok(v) = unsafe { CStr::from_ptr(select).to_str() } {
+        v.to_string()
+    } else {
+        return ERR_CONFIG_PATH;
+    };
+
+    let manager = leaf::RUNTIME_MANAGER.lock().unwrap().get(&rt_id).cloned();
+    let result = if let Some(m) = manager {
+        #[cfg(feature = "outbound-select")]
+        {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async move { m.set_outbound_selected(&outbound, &select).await })
+        }
+        #[cfg(not(feature = "outbound-select"))]
+        {
+            let _ = m;
+            Err(leaf::Error::RuntimeManager)
+        }
+    } else {
+        Err(leaf::Error::RuntimeManager)
+    };
+
+    match result {
+        Ok(()) => ERR_OK,
+        Err(e) => to_errno(e),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn leaf_get_outbound_selected(
+    rt_id: u16,
+    outbound: *const c_char,
+    buf: *mut c_char,
+    buf_len: i32,
+) -> i32 {
+    let outbound = if let Ok(v) = unsafe { CStr::from_ptr(outbound).to_str() } {
+        v.to_string()
+    } else {
+        return ERR_CONFIG_PATH;
+    };
+
+    let manager = leaf::RUNTIME_MANAGER.lock().unwrap().get(&rt_id).cloned();
+    let result = if let Some(m) = manager {
+        #[cfg(feature = "outbound-select")]
+        {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async move { m.get_outbound_selected(&outbound).await })
+        }
+        #[cfg(not(feature = "outbound-select"))]
+        {
+            let _ = m;
+            Err(leaf::Error::RuntimeManager)
+        }
+    } else {
+        Err(leaf::Error::RuntimeManager)
+    };
+
+    match result {
+        Ok(selected) => write_string_to_buf(&selected, buf, buf_len),
+        Err(e) => to_errno(e),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn leaf_get_outbound_selects(
+    rt_id: u16,
+    outbound: *const c_char,
+    buf: *mut c_char,
+    buf_len: i32,
+) -> i32 {
+    let outbound = if let Ok(v) = unsafe { CStr::from_ptr(outbound).to_str() } {
+        v.to_string()
+    } else {
+        return ERR_CONFIG_PATH;
+    };
+
+    let manager = leaf::RUNTIME_MANAGER.lock().unwrap().get(&rt_id).cloned();
+    let result = if let Some(m) = manager {
+        #[cfg(feature = "outbound-select")]
+        {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async move { m.get_outbound_selects(&outbound).await })
+        }
+        #[cfg(not(feature = "outbound-select"))]
+        {
+            let _ = m;
+            Err(leaf::Error::RuntimeManager)
+        }
+    } else {
+        Err(leaf::Error::RuntimeManager)
+    };
+
+    match result {
+        Ok(selects) => match serde_json::to_string(&selects) {
+            Ok(json) => write_string_to_buf(&json, buf, buf_len),
+            Err(_) => ERR_IO,
+        },
+        Err(e) => to_errno(e),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn leaf_get_stats(rt_id: u16, buf: *mut c_char, buf_len: i32) -> i32 {
+    let manager = leaf::RUNTIME_MANAGER.lock().unwrap().get(&rt_id).cloned();
+    let Some(manager) = manager else {
+        return ERR_RUNTIME_MANAGER;
+    };
+
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(_) => return ERR_IO,
+    };
+
+    let json = rt.block_on(async move {
+        let sm = manager.stat_manager();
+        let sm = sm.read().await;
+        let stats: Vec<_> = sm
+            .counters
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "network": c.sess.network.to_string(),
+                    "inbound_tag": c.sess.inbound_tag,
+                    "forwarded_source": c.sess.forwarded_source.map(|x| x.to_string()),
+                    "source": c.sess.source.to_string(),
+                    "destination": c.sess.destination.to_string(),
+                    "outbound_tag": c.sess.outbound_tag,
+                    "bytes_sent": c.bytes_sent(),
+                    "bytes_recvd": c.bytes_recvd(),
+                    "send_completed": c.send_completed(),
+                    "recv_completed": c.recv_completed(),
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::to_string(&stats)
+    });
+
+    match json {
+        Ok(json) => write_string_to_buf(&json, buf, buf_len),
+        Err(_) => ERR_IO,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn leaf_set_env(key: *const c_char, value: *const c_char) {
+    let key = if let Ok(v) = unsafe { CStr::from_ptr(key).to_str() } {
+        v
+    } else {
+        return;
+    };
+    let value = if let Ok(v) = unsafe { CStr::from_ptr(value).to_str() } {
+        v
+    } else {
+        return;
+    };
+    std::env::set_var(key, value);
+}
+
+#[no_mangle]
+pub extern "C" fn leaf_free_string(_s: *const c_char) {
+    // String values are currently written into caller-provided buffers.
+    // Keep this symbol as a no-op for ABI compatibility.
 }

@@ -218,14 +218,7 @@ impl RuntimeManager {
     //
     // TODO Reload FakeDns. And perhaps the inbounds as long as the listening
     // addresses haven't changed.
-    pub async fn reload(&self) -> Result<(), Error> {
-        let config_path = if let Some(p) = self.config_path.as_ref() {
-            p
-        } else {
-            return Err(Error::NoConfigFile);
-        };
-        info!("reloading from config file: {}", config_path);
-        let mut config = config::from_file(config_path).map_err(Error::Config)?;
+    async fn reload_from_config(&self, mut config: config::Config) -> Result<(), Error> {
         app::logger::setup_logger(&config.log)?;
         self.router.write().await.reload(&mut config.router)?;
         self.dns_client.write().await.reload(&config.dns)?;
@@ -234,8 +227,25 @@ impl RuntimeManager {
             .await
             .reload(&config.outbounds, self.dns_client.clone())
             .await?;
+        Ok(())
+    }
+
+    pub async fn reload(&self) -> Result<(), Error> {
+        let config_path = if let Some(p) = self.config_path.as_ref() {
+            p
+        } else {
+            return Err(Error::NoConfigFile);
+        };
+        info!("reloading from config file: {}", config_path);
+        let config = config::from_file(config_path).map_err(Error::Config)?;
+        self.reload_from_config(config).await?;
         info!("reloaded from config file: {}", config_path);
         Ok(())
+    }
+
+    pub async fn reload_with_config_string(&self, config: &str) -> Result<(), Error> {
+        let parsed = config::from_string(config).map_err(Error::Config)?;
+        self.reload_from_config(parsed).await
     }
 
     pub fn blocking_reload(&self) -> Result<(), Error> {
@@ -359,6 +369,20 @@ pub fn reload(key: RuntimeId) -> Result<(), Error> {
         .get(&key)
     {
         return m.blocking_reload();
+    }
+    Err(Error::RuntimeManager)
+}
+
+pub fn reload_with_config_string(key: RuntimeId, config: &str) -> Result<(), Error> {
+    if let Some(m) = RUNTIME_MANAGER
+        .lock()
+        .map_err(|_| Error::RuntimeManager)?
+        .get(&key)
+        .cloned()
+    {
+        let config = config.to_owned();
+        let rt = tokio::runtime::Runtime::new().map_err(Error::Io)?;
+        return rt.block_on(async move { m.reload_with_config_string(&config).await });
     }
     Err(Error::RuntimeManager)
 }
