@@ -740,6 +740,35 @@ pub unsafe extern "system" fn Java_com_follow_clash_common_LeafBridge_leafRunWit
     )
 }
 
+/// JNI: Start leaf with in-memory config string. Blocks the calling thread.
+#[cfg(target_os = "android")]
+#[allow(non_snake_case)]
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_follow_clash_common_LeafBridge_leafRunWithOptionsConfigString(
+    mut env: JNIEnv,
+    _class: JClass,
+    rt_id: jint,
+    config: JString,
+    multi_thread: jboolean,
+    auto_threads: jboolean,
+    threads: jint,
+    stack_size: jint,
+) -> jint {
+    let Ok(config) = env.get_string(&config) else {
+        return ERR_CONFIG;
+    };
+    let config: String = config.into();
+    let config_ptr = std::ffi::CString::new(config).unwrap();
+    leaf_run_with_options_config_string(
+        rt_id as u16,
+        config_ptr.as_ptr(),
+        multi_thread != 0,
+        auto_threads != 0,
+        threads,
+        stack_size,
+    )
+}
+
 /// JNI: Reload leaf config.
 #[cfg(target_os = "android")]
 #[allow(non_snake_case)]
@@ -750,6 +779,24 @@ pub unsafe extern "system" fn Java_com_follow_clash_common_LeafBridge_leafReload
     rt_id: jint,
 ) -> jint {
     leaf_reload(rt_id as u16)
+}
+
+/// JNI: Reload leaf from in-memory config string.
+#[cfg(target_os = "android")]
+#[allow(non_snake_case)]
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_follow_clash_common_LeafBridge_leafReloadWithConfigString(
+    mut env: JNIEnv,
+    _class: JClass,
+    rt_id: jint,
+    config: JString,
+) -> jint {
+    let Ok(config) = env.get_string(&config) else {
+        return ERR_CONFIG;
+    };
+    let config: String = config.into();
+    let config_ptr = std::ffi::CString::new(config).unwrap();
+    leaf_reload_with_config_string(rt_id as u16, config_ptr.as_ptr())
 }
 
 /// JNI: Shutdown leaf.
@@ -791,4 +838,21 @@ pub unsafe extern "system" fn Java_com_follow_clash_common_LeafBridge_leafTestCo
     let path: String = path.into();
     let path_ptr = std::ffi::CString::new(path).unwrap();
     leaf_test_config(path_ptr.as_ptr())
+}
+
+/// JNI: Test in-memory config string.
+#[cfg(target_os = "android")]
+#[allow(non_snake_case)]
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_follow_clash_common_LeafBridge_leafTestConfigString(
+    mut env: JNIEnv,
+    _class: JClass,
+    config: JString,
+) -> jint {
+    let Ok(config) = env.get_string(&config) else {
+        return ERR_CONFIG;
+    };
+    let config: String = config.into();
+    let config_ptr = std::ffi::CString::new(config).unwrap();
+    leaf_test_config_string(config_ptr.as_ptr())
 }
