@@ -674,7 +674,7 @@ pub unsafe extern "system" fn JNI_OnUnload(_vm: JavaVM, _: *mut std::os::raw::c_
 #[cfg(target_os = "android")]
 #[allow(non_snake_case)]
 #[no_mangle]
-pub unsafe extern "system" fn Java_com_follow_clash_core_LeafBridge_nativeSetProtectSocketCallback(
+pub unsafe extern "system" fn Java_com_follow_clash_common_LeafBridge_nativeSetProtectSocketCallback(
     mut env: JNIEnv,
     receiver: JObject,
 ) {
@@ -688,13 +688,13 @@ pub unsafe extern "system" fn Java_com_follow_clash_core_LeafBridge_nativeSetPro
     // On some build/tooling combinations JNI may provide a class-like receiver
     // for `object` methods; using INSTANCE avoids class-vs-instance mismatch.
     let receiver_obj = env
-        .find_class("com/follow/clash/core/LeafBridge")
+        .find_class("com/follow/clash/common/LeafBridge")
         .ok()
         .and_then(|cls| {
             env.get_static_field(
                 &cls,
                 "INSTANCE",
-                "Lcom/follow/clash/core/LeafBridge;",
+                "Lcom/follow/clash/common/LeafBridge;",
             )
             .ok()
             .and_then(|value| value.l().ok())
@@ -713,7 +713,7 @@ pub unsafe extern "system" fn Java_com_follow_clash_core_LeafBridge_nativeSetPro
 #[cfg(target_os = "android")]
 #[allow(non_snake_case)]
 #[no_mangle]
-pub unsafe extern "system" fn Java_com_follow_clash_core_LeafBridge_leafRunWithOptions(
+pub unsafe extern "system" fn Java_com_follow_clash_common_LeafBridge_leafRunWithOptions(
     mut env: JNIEnv,
     _class: JClass,
     rt_id: jint,
@@ -744,7 +744,7 @@ pub unsafe extern "system" fn Java_com_follow_clash_core_LeafBridge_leafRunWithO
 #[cfg(target_os = "android")]
 #[allow(non_snake_case)]
 #[no_mangle]
-pub unsafe extern "system" fn Java_com_follow_clash_core_LeafBridge_leafReload(
+pub unsafe extern "system" fn Java_com_follow_clash_common_LeafBridge_leafReload(
     _env: JNIEnv,
     _class: JClass,
     rt_id: jint,
@@ -756,7 +756,7 @@ pub unsafe extern "system" fn Java_com_follow_clash_core_LeafBridge_leafReload(
 #[cfg(target_os = "android")]
 #[allow(non_snake_case)]
 #[no_mangle]
-pub unsafe extern "system" fn Java_com_follow_clash_core_LeafBridge_leafShutdown(
+pub unsafe extern "system" fn Java_com_follow_clash_common_LeafBridge_leafShutdown(
     _env: JNIEnv,
     _class: JClass,
     rt_id: jint,
@@ -768,7 +768,7 @@ pub unsafe extern "system" fn Java_com_follow_clash_core_LeafBridge_leafShutdown
 #[cfg(target_os = "android")]
 #[allow(non_snake_case)]
 #[no_mangle]
-pub unsafe extern "system" fn Java_com_follow_clash_core_LeafBridge_leafCloseConnections(
+pub unsafe extern "system" fn Java_com_follow_clash_common_LeafBridge_leafCloseConnections(
     _env: JNIEnv,
     _class: JClass,
     rt_id: jint,
@@ -780,7 +780,7 @@ pub unsafe extern "system" fn Java_com_follow_clash_core_LeafBridge_leafCloseCon
 #[cfg(target_os = "android")]
 #[allow(non_snake_case)]
 #[no_mangle]
-pub unsafe extern "system" fn Java_com_follow_clash_core_LeafBridge_leafTestConfig(
+pub unsafe extern "system" fn Java_com_follow_clash_common_LeafBridge_leafTestConfig(
     mut env: JNIEnv,
     _class: JClass,
     config_path: JString,

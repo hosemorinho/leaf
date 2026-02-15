@@ -1,14 +1,70 @@
 use std::{
     env,
+    fs,
     path::{Path, PathBuf},
     process::Command,
 };
+
+fn resolve_android_prebuilt_dir() -> Option<PathBuf> {
+    let ndk = env::var("ANDROID_NDK")
+        .or_else(|_| env::var("ANDROID_NDK_HOME"))
+        .or_else(|_| env::var("ANDROID_NDK_LATEST_HOME"))
+        .or_else(|_| env::var("NDK_HOME"))
+        .ok()?;
+
+    let prebuilt = Path::new(&ndk).join("toolchains").join("llvm").join("prebuilt");
+    let candidates = [
+        "windows-x86_64",
+        "linux-x86_64",
+        "darwin-arm64",
+        "darwin-x86_64",
+    ];
+    for candidate in candidates {
+        let host_dir = prebuilt.join(candidate);
+        if host_dir.exists() {
+            return Some(host_dir);
+        }
+    }
+
+    if let Ok(entries) = fs::read_dir(&prebuilt) {
+        for entry in entries.flatten() {
+            if entry.path().is_dir() {
+                return Some(entry.path());
+            }
+        }
+    }
+    None
+}
+
+fn resolve_android_sysroot() -> Option<PathBuf> {
+    resolve_android_prebuilt_dir().map(|d| d.join("sysroot"))
+}
+
+fn resolve_android_clang_include() -> Option<PathBuf> {
+    let prebuilt = resolve_android_prebuilt_dir()?;
+    let clang_root = prebuilt.join("lib").join("clang");
+    let mut versions: Vec<PathBuf> = fs::read_dir(&clang_root)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    versions.sort();
+    versions.reverse();
+    for version_dir in versions {
+        let include = version_dir.join("include");
+        if include.exists() {
+            return Some(include);
+        }
+    }
+    None
+}
 
 fn generate_mobile_bindings() {
     println!("cargo:rerun-if-changed=src/mobile/wrapper.h");
     let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
     let os = env::var("CARGO_CFG_TARGET_OS").unwrap();
-    let bindings = bindgen::Builder::default()
+    let mut builder = bindgen::Builder::default()
         .header("src/mobile/wrapper.h")
         .clang_arg("-Wno-everything")
         .layout_tests(false)
@@ -31,7 +87,22 @@ fn generate_mobile_bindings() {
             format!("-I{}", inc_path.to_str().expect("invalid include path"))
         } else {
             "".to_string()
-        })
+        });
+
+    if os == "android" {
+        if let Ok(target) = env::var("TARGET") {
+            builder = builder.clang_arg(format!("--target={target}"));
+        }
+        if let Some(sysroot) = resolve_android_sysroot() {
+            let sysroot = sysroot.to_string_lossy().to_string();
+            builder = builder.clang_arg(format!("--sysroot={sysroot}"));
+        }
+        if let Some(clang_include) = resolve_android_clang_include() {
+            builder = builder.clang_arg(format!("-I{}", clang_include.to_string_lossy()));
+        }
+    }
+
+    let bindings = builder
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .generate()
         .expect("Unable to generate bindings");
