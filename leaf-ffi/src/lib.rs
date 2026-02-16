@@ -709,6 +709,26 @@ pub unsafe extern "system" fn Java_com_follow_clash_common_LeafBridge_nativeSetP
     }
 }
 
+/// JNI: Set process environment variable for leaf runtime.
+/// Called from LeafBridge.leafSetEnv(key, value) in Kotlin.
+#[cfg(target_os = "android")]
+#[allow(non_snake_case)]
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_follow_clash_common_LeafBridge_leafSetEnv(
+    mut env: JNIEnv,
+    _class: JClass,
+    key: JString,
+    value: JString,
+) {
+    let Ok(key) = env.get_string(&key) else {
+        return;
+    };
+    let Ok(value) = env.get_string(&value) else {
+        return;
+    };
+    std::env::set_var(key.to_string_lossy().as_ref(), value.to_string_lossy().as_ref());
+}
+
 /// JNI: Start leaf with options. Blocks the calling thread.
 #[cfg(target_os = "android")]
 #[allow(non_snake_case)]
