@@ -823,6 +823,42 @@ pub unsafe extern "system" fn Java_com_follow_clash_common_LeafBridge_leafCloseC
     leaf_close_connections(rt_id as u16) as jboolean
 }
 
+/// JNI: Set selected outbound for selector group.
+#[cfg(target_os = "android")]
+#[allow(non_snake_case)]
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_follow_clash_common_LeafBridge_leafSetOutboundSelected(
+    mut env: JNIEnv,
+    _class: JClass,
+    rt_id: jint,
+    outbound: JString,
+    select: JString,
+) -> jint {
+    let Ok(outbound) = env.get_string(&outbound) else {
+        return ERR_CONFIG_PATH;
+    };
+    let Ok(select) = env.get_string(&select) else {
+        return ERR_CONFIG_PATH;
+    };
+
+    #[cfg(feature = "outbound-select")]
+    {
+        let outbound: String = outbound.into();
+        let select: String = select.into();
+        let outbound_ptr = std::ffi::CString::new(outbound).unwrap();
+        let select_ptr = std::ffi::CString::new(select).unwrap();
+        return leaf_set_outbound_selected(rt_id as u16, outbound_ptr.as_ptr(), select_ptr.as_ptr());
+    }
+
+    #[cfg(not(feature = "outbound-select"))]
+    {
+        let _ = outbound;
+        let _ = select;
+        let _ = rt_id;
+        ERR_RUNTIME_MANAGER
+    }
+}
+
 /// JNI: Test config.
 #[cfg(target_os = "android")]
 #[allow(non_snake_case)]
