@@ -112,7 +112,7 @@ pub enum OutboundBind {
 }
 
 #[cfg(target_os = "android")]
-async fn protect_socket(fd: RawFd) -> io::Result<()> {
+pub(crate) async fn protect_socket(fd: RawFd) -> io::Result<()> {
     if crate::mobile::callback::android::is_protect_socket_callback_set() {
         let start = std::time::Instant::now();
         crate::mobile::callback::android::protect_socket(fd).map_err(|e| {

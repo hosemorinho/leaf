@@ -4,6 +4,8 @@ use tokio::sync::RwLock;
 
 pub mod dispatcher;
 pub mod dns_client;
+#[cfg(feature = "dns-over-https")]
+pub mod doh_client;
 pub mod healthcheck;
 pub mod inbound;
 pub mod logger;

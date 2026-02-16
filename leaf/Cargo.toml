@@ -21,6 +21,7 @@ default-ring = [
     "rustls-tls",
     "rustls-tls-ring",
     "quinn-ring",
+    "dns-over-https",
     "api",
 ]
 
@@ -31,6 +32,7 @@ default-aws-lc = [
     "rustls-tls",
     "rustls-tls-aws-lc",
     "quinn-aws-lc",
+    "dns-over-https",
     "api",
 ]
 
@@ -93,6 +95,7 @@ all-endpoints = [
 ring-aead = ["ring"]
 aws-lc-aead = ["aws-lc-rs"]
 rustls-tls = ["tokio-rustls", "webpki-roots", "rustls-pemfile", "rustls"]
+dns-over-https = ["rustls-tls"]
 
 # Openssl-related, for platforms not supported by ring, such as mips
 openssl-aead = ["openssl"]

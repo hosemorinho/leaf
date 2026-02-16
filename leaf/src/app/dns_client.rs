@@ -21,6 +21,9 @@ use tracing::{debug, trace, Instrument};
 
 use crate::{app::dispatcher::Dispatcher, option, proxy::*, session::*};
 
+#[cfg(feature = "dns-over-https")]
+use crate::app::doh_client::{DoHClient, DoHServer};
+
 #[derive(Clone, Debug)]
 struct CacheEntry {
     pub ips: Vec<IpAddr>,
@@ -34,18 +37,60 @@ pub struct DnsClient {
     hosts: HashMap<String, Vec<IpAddr>>,
     ipv4_cache: Arc<TokioMutex<LruCache<String, CacheEntry>>>,
     ipv6_cache: Arc<TokioMutex<LruCache<String, CacheEntry>>>,
+    #[cfg(feature = "dns-over-https")]
+    doh_client: Option<Arc<DoHClient>>,
+}
+
+/// Result of parsing DNS server config strings.
+struct ParsedServers {
+    udp_servers: Vec<SocketAddr>,
+    #[cfg(feature = "dns-over-https")]
+    doh_servers: Vec<DoHServer>,
 }
 
 impl DnsClient {
-    fn load_servers(dns: &crate::config::Dns) -> Result<Vec<SocketAddr>> {
-        let mut servers = Vec::new();
+    fn load_servers(dns: &crate::config::Dns) -> Result<ParsedServers> {
+        let mut udp_servers = Vec::new();
+        #[cfg(feature = "dns-over-https")]
+        let mut doh_servers = Vec::new();
+
         for server in dns.servers.iter() {
-            servers.push(SocketAddr::new(server.parse::<IpAddr>()?, 53));
+            #[cfg(feature = "dns-over-https")]
+            if server.starts_with("https://") {
+                match DoHServer::parse(server) {
+                    Ok(s) => {
+                        debug!("loaded DoH server: {} ({})", server, s.socket_addr());
+                        doh_servers.push(s);
+                        continue;
+                    }
+                    Err(e) => {
+                        debug!("failed to parse DoH server {}: {}", server, e);
+                        continue;
+                    }
+                }
+            }
+
+            match server.parse::<IpAddr>() {
+                Ok(ip) => udp_servers.push(SocketAddr::new(ip, 53)),
+                Err(e) => debug!("failed to parse DNS server {}: {}", server, e),
+            }
         }
-        if servers.is_empty() {
+
+        #[cfg(feature = "dns-over-https")]
+        if udp_servers.is_empty() && doh_servers.is_empty() {
             return Err(anyhow!("no dns servers"));
         }
-        Ok(servers)
+
+        #[cfg(not(feature = "dns-over-https"))]
+        if udp_servers.is_empty() {
+            return Err(anyhow!("no dns servers"));
+        }
+
+        Ok(ParsedServers {
+            udp_servers,
+            #[cfg(feature = "dns-over-https")]
+            doh_servers,
+        })
     }
 
     fn load_hosts(dns: &crate::config::Dns) -> HashMap<String, Vec<IpAddr>> {
@@ -72,7 +117,7 @@ impl DnsClient {
         } else {
             return Err(anyhow!("empty dns config"));
         };
-        let servers = Self::load_servers(dns)?;
+        let parsed = Self::load_servers(dns)?;
         let hosts = Self::load_hosts(dns);
         let ipv4_cache = Arc::new(TokioMutex::new(LruCache::<String, CacheEntry>::new(
             NonZeroUsize::new(*option::DNS_CACHE_SIZE).unwrap(),
@@ -81,12 +126,30 @@ impl DnsClient {
             NonZeroUsize::new(*option::DNS_CACHE_SIZE).unwrap(),
         )));
 
+        #[cfg(feature = "dns-over-https")]
+        let doh_client = if !parsed.doh_servers.is_empty() {
+            match DoHClient::new(parsed.doh_servers) {
+                Ok(c) => {
+                    debug!("DoH client initialized with {} servers", c.server_count());
+                    Some(Arc::new(c))
+                }
+                Err(e) => {
+                    debug!("failed to create DoH client: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Ok(Self {
             dispatcher: None,
-            servers,
+            servers: parsed.udp_servers,
             hosts,
             ipv4_cache,
             ipv6_cache,
+            #[cfg(feature = "dns-over-https")]
+            doh_client,
         })
     }
 
@@ -100,10 +163,26 @@ impl DnsClient {
         } else {
             return Err(anyhow!("empty dns config"));
         };
-        let servers = Self::load_servers(dns)?;
+        let parsed = Self::load_servers(dns)?;
         let hosts = Self::load_hosts(dns);
-        self.servers = servers;
+        self.servers = parsed.udp_servers;
         self.hosts = hosts;
+
+        #[cfg(feature = "dns-over-https")]
+        {
+            self.doh_client = if !parsed.doh_servers.is_empty() {
+                match DoHClient::new(parsed.doh_servers) {
+                    Ok(c) => Some(Arc::new(c)),
+                    Err(e) => {
+                        debug!("failed to create DoH client on reload: {}", e);
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+        }
+
         Ok(())
     }
 
@@ -324,6 +403,70 @@ impl DnsClient {
         .await
     }
 
+    /// DoH query task — always direct, never goes through proxy dispatcher.
+    /// Sends DNS wire-format query to the DoH server and parses the response.
+    #[cfg(feature = "dns-over-https")]
+    async fn doh_query_task(
+        doh_client: Arc<DoHClient>,
+        server_idx: usize,
+        request: Vec<u8>,
+        host: String,
+    ) -> Result<CacheEntry> {
+        let server_addr = doh_client.server_addr(server_idx);
+        debug!("DoH query to {} for {}", server_addr, host);
+        let start = tokio::time::Instant::now();
+
+        let response_bytes = doh_client.query(server_idx, &request).await?;
+
+        let resp = Message::from_vec(&response_bytes)
+            .map_err(|e| anyhow!("parse DoH DNS message from {} failed: {}", server_addr, e))?;
+
+        if resp.response_code() != ResponseCode::NoError {
+            return Err(anyhow!(
+                "DoH DNS response from {} for {} error: {}",
+                server_addr,
+                host,
+                resp.response_code()
+            ));
+        }
+
+        let mut ips = Vec::new();
+        for ans in resp.answers() {
+            if let Some(data) = ans.data() {
+                match data {
+                    RData::A(ip) => ips.push(IpAddr::V4(**ip)),
+                    RData::AAAA(ip) => ips.push(IpAddr::V6(**ip)),
+                    _ => (),
+                }
+            }
+        }
+
+        if ips.is_empty() {
+            return Err(anyhow!(
+                "no records in DoH DNS response from {} for {}",
+                server_addr,
+                host
+            ));
+        }
+
+        let elapsed = tokio::time::Instant::now().duration_since(start);
+        let ttl = resp.answers().iter().next().unwrap().ttl();
+        debug!(
+            "DoH returned {} ips (ttl {}) for {} from {} in {}ms",
+            ips.len(),
+            ttl,
+            host,
+            server_addr,
+            elapsed.as_millis(),
+        );
+
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(ttl.into()))
+            .ok_or_else(|| anyhow!("invalid ttl"))?;
+
+        Ok(CacheEntry { ips, deadline })
+    }
+
     fn new_query(name: Name, ty: RecordType) -> Message {
         let mut msg = Message::new();
         msg.add_query(Query::query(name, ty));
@@ -391,6 +534,40 @@ impl DnsClient {
         self._lookup_inner(host, is_direct).instrument(span).await
     }
 
+    /// Build racing tasks for a single record type query.
+    /// When DoH is available, only DoH tasks are created (all direct, no proxy).
+    /// Falls back to UDP tasks only if no DoH client is configured.
+    fn build_racing_tasks<'a>(
+        &'a self,
+        msg_buf: Vec<u8>,
+        host: &'a str,
+        is_direct: bool,
+    ) -> Vec<std::pin::Pin<Box<dyn std::future::Future<Output = Result<CacheEntry>> + Send + 'a>>>
+    {
+        let mut tasks: Vec<
+            std::pin::Pin<Box<dyn std::future::Future<Output = Result<CacheEntry>> + Send + 'a>>,
+        > = Vec::new();
+
+        #[cfg(feature = "dns-over-https")]
+        if let Some(ref doh_client) = self.doh_client {
+            // DoH-only: all servers race concurrently, all direct (no proxy)
+            for idx in 0..doh_client.server_count() {
+                let client = doh_client.clone();
+                let buf = msg_buf.clone();
+                let h = host.to_string();
+                tasks.push(Box::pin(Self::doh_query_task(client, idx, buf, h)));
+            }
+            return tasks;
+        }
+
+        // Fallback: UDP DNS
+        for server in &self.servers {
+            let t = self.query_task(is_direct, msg_buf.clone(), host, server);
+            tasks.push(Box::pin(t));
+        }
+        tasks
+    }
+
     async fn _lookup_inner(&self, host: &String, is_direct: bool) -> Result<Vec<IpAddr>> {
         if let Ok(ip) = host.parse::<IpAddr>() {
             return Ok(vec![ip]);
@@ -433,7 +610,6 @@ impl DnsClient {
 
         let mut query_tasks = Vec::new();
 
-        // TODO reduce boilerplates
         match (*crate::option::ENABLE_IPV6, *crate::option::PREFER_IPV6) {
             (true, true) => {
                 let msg = Self::new_query(name.clone(), RecordType::AAAA);
@@ -441,26 +617,20 @@ impl DnsClient {
                     Ok(b) => b,
                     Err(e) => return Err(anyhow!("encode message to buffer failed: {}", e)),
                 };
-                let mut tasks = Vec::new();
-                for server in &self.servers {
-                    let t = self.query_task(is_direct, msg_buf.clone(), host, server);
-                    tasks.push(Box::pin(t));
+                let tasks = self.build_racing_tasks(msg_buf, host, is_direct);
+                if !tasks.is_empty() {
+                    query_tasks.push(select_ok(tasks.into_iter()));
                 }
-                let query_task = select_ok(tasks.into_iter());
-                query_tasks.push(query_task);
 
                 let msg = Self::new_query(name.clone(), RecordType::A);
                 let msg_buf = match msg.to_vec() {
                     Ok(b) => b,
                     Err(e) => return Err(anyhow!("encode message to buffer failed: {}", e)),
                 };
-                let mut tasks = Vec::new();
-                for server in &self.servers {
-                    let t = self.query_task(is_direct, msg_buf.clone(), host, server);
-                    tasks.push(Box::pin(t));
+                let tasks = self.build_racing_tasks(msg_buf, host, is_direct);
+                if !tasks.is_empty() {
+                    query_tasks.push(select_ok(tasks.into_iter()));
                 }
-                let query_task = select_ok(tasks.into_iter());
-                query_tasks.push(query_task);
             }
             (true, false) => {
                 let msg = Self::new_query(name.clone(), RecordType::A);
@@ -468,26 +638,20 @@ impl DnsClient {
                     Ok(b) => b,
                     Err(e) => return Err(anyhow!("encode message to buffer failed: {}", e)),
                 };
-                let mut tasks = Vec::new();
-                for server in &self.servers {
-                    let t = self.query_task(is_direct, msg_buf.clone(), host, server);
-                    tasks.push(Box::pin(t));
+                let tasks = self.build_racing_tasks(msg_buf, host, is_direct);
+                if !tasks.is_empty() {
+                    query_tasks.push(select_ok(tasks.into_iter()));
                 }
-                let query_task = select_ok(tasks.into_iter());
-                query_tasks.push(query_task);
 
                 let msg = Self::new_query(name.clone(), RecordType::AAAA);
                 let msg_buf = match msg.to_vec() {
                     Ok(b) => b,
                     Err(e) => return Err(anyhow!("encode message to buffer failed: {}", e)),
                 };
-                let mut tasks = Vec::new();
-                for server in &self.servers {
-                    let t = self.query_task(is_direct, msg_buf.clone(), host, server);
-                    tasks.push(Box::pin(t));
+                let tasks = self.build_racing_tasks(msg_buf, host, is_direct);
+                if !tasks.is_empty() {
+                    query_tasks.push(select_ok(tasks.into_iter()));
                 }
-                let query_task = select_ok(tasks.into_iter());
-                query_tasks.push(query_task);
             }
             _ => {
                 let msg = Self::new_query(name.clone(), RecordType::A);
@@ -495,13 +659,10 @@ impl DnsClient {
                     Ok(b) => b,
                     Err(e) => return Err(anyhow!("encode message to buffer failed: {}", e)),
                 };
-                let mut tasks = Vec::new();
-                for server in &self.servers {
-                    let t = self.query_task(is_direct, msg_buf.clone(), host, server);
-                    tasks.push(Box::pin(t));
+                let tasks = self.build_racing_tasks(msg_buf, host, is_direct);
+                if !tasks.is_empty() {
+                    query_tasks.push(select_ok(tasks.into_iter()));
                 }
-                let query_task = select_ok(tasks.into_iter());
-                query_tasks.push(query_task);
             }
         }
 
