@@ -23,7 +23,12 @@ pub struct DoHServer {
     pub ip: IpAddr,
     pub port: u16,
     pub path: String,
+    /// HTTP/1.1 Host header authority value.
+    /// - IPv6 uses brackets, e.g. `[2606:4700::1111]`
+    /// - Non-default ports append `:port`
     pub host_header: String,
+    /// TLS server name used for certificate verification (IP literal, no port/brackets).
+    pub tls_server_name: String,
 }
 
 impl DoHServer {
@@ -76,11 +81,23 @@ impl DoHServer {
             .parse()
             .map_err(|_| anyhow!("DoH host must be an IP address, got: {}", host_str))?;
 
+        let tls_server_name = ip.to_string();
+        let host_authority = match ip {
+            IpAddr::V4(_) => tls_server_name.clone(),
+            IpAddr::V6(_) => format!("[{}]", tls_server_name),
+        };
+        let host_header = if port == 443 {
+            host_authority
+        } else {
+            format!("{}:{}", host_authority, port)
+        };
+
         Ok(DoHServer {
             ip,
             port,
             path: path.to_string(),
-            host_header: host_str.to_string(),
+            host_header,
+            tls_server_name,
         })
     }
 
@@ -140,6 +157,8 @@ impl DoHClient {
             SocketAddr::V6(..) => TcpSocket::new_v6()?,
         };
 
+        crate::proxy::bind_outbound_tcp_socket(&socket, addr).await?;
+
         #[cfg(target_os = "android")]
         crate::proxy::protect_socket(socket.as_raw_fd()).await?;
 
@@ -162,24 +181,27 @@ impl DoHClient {
         let tcp_stream = self.direct_tcp_connect(&addr).await?;
 
         let connector = TlsConnector::from(self.tls_config.clone());
-        let domain = ServerName::try_from(server.host_header.as_str())
+        let domain = ServerName::try_from(server.tls_server_name.as_str())
             .map_err(|e| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!("invalid DoH server name {}: {}", server.host_header, e),
+                    format!("invalid DoH server name {}: {}", server.tls_server_name, e),
                 )
             })?
             .to_owned();
 
-        let tls_stream = timeout(Duration::from_secs(5), connector.connect(domain, tcp_stream))
-            .await
-            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "DoH TLS handshake timeout"))?
-            .map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::ConnectionRefused,
-                    format!("DoH TLS handshake with {} failed: {}", addr, e),
-                )
-            })?;
+        let tls_stream = timeout(
+            Duration::from_secs(5),
+            connector.connect(domain, tcp_stream),
+        )
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "DoH TLS handshake timeout"))?
+        .map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::ConnectionRefused,
+                format!("DoH TLS handshake with {} failed: {}", addr, e),
+            )
+        })?;
 
         debug!("DoH TLS connected to {}", addr);
         Ok(tls_stream)
@@ -223,20 +245,22 @@ impl DoHClient {
 
         // Send request
         if let Err(e) = stream.write_all(request.as_bytes()).await {
-            debug!("DoH write header to {} failed: {}, reconnecting", server.socket_addr(), e);
+            debug!(
+                "DoH write header to {} failed: {}, reconnecting",
+                server.socket_addr(),
+                e
+            );
             stream = self.tls_connect(server).await?;
             stream.write_all(request.as_bytes()).await?;
         }
-        stream.write_all(dns_wire).await.map_err(|e| {
-            anyhow!("DoH write body to {} failed: {}", server.socket_addr(), e)
-        })?;
+        stream
+            .write_all(dns_wire)
+            .await
+            .map_err(|e| anyhow!("DoH write body to {} failed: {}", server.socket_addr(), e))?;
         stream.flush().await?;
 
         // Read HTTP response
-        match self
-            .read_http_response(&mut stream, server_idx)
-            .await
-        {
+        match self.read_http_response(&mut stream, server_idx).await {
             Ok(body) => {
                 // Return connection to pool for reuse
                 self.return_to_pool(server_idx, stream).await;
@@ -270,9 +294,7 @@ impl DoHClient {
                 Ok(Ok(1)) => {
                     header_buf.push(byte[0]);
                     // Check for \r\n\r\n end-of-headers
-                    if header_buf.len() >= 4
-                        && &header_buf[header_buf.len() - 4..] == b"\r\n\r\n"
-                    {
+                    if header_buf.len() >= 4 && &header_buf[header_buf.len() - 4..] == b"\r\n\r\n" {
                         headers_done = true;
                     }
                     if header_buf.len() > 4096 {
@@ -347,6 +369,7 @@ mod tests {
         assert_eq!(s.port, 443);
         assert_eq!(s.path, "/dns-query");
         assert_eq!(s.host_header, "1.1.1.1");
+        assert_eq!(s.tls_server_name, "1.1.1.1");
     }
 
     #[test]
@@ -355,6 +378,8 @@ mod tests {
         assert_eq!(s.ip, "8.8.8.8".parse::<IpAddr>().unwrap());
         assert_eq!(s.port, 8443);
         assert_eq!(s.path, "/resolve");
+        assert_eq!(s.host_header, "8.8.8.8:8443");
+        assert_eq!(s.tls_server_name, "8.8.8.8");
     }
 
     #[test]
@@ -366,11 +391,10 @@ mod tests {
     #[test]
     fn test_parse_ipv6() {
         let s = DoHServer::parse("https://[2606:4700::1111]/dns-query").unwrap();
-        assert_eq!(
-            s.ip,
-            "2606:4700::1111".parse::<IpAddr>().unwrap()
-        );
+        assert_eq!(s.ip, "2606:4700::1111".parse::<IpAddr>().unwrap());
         assert_eq!(s.port, 443);
+        assert_eq!(s.host_header, "[2606:4700::1111]");
+        assert_eq!(s.tls_server_name, "2606:4700::1111");
     }
 
     #[test]
@@ -378,6 +402,8 @@ mod tests {
         let s = DoHServer::parse("https://[::1]:8443/dns-query").unwrap();
         assert_eq!(s.ip, "::1".parse::<IpAddr>().unwrap());
         assert_eq!(s.port, 8443);
+        assert_eq!(s.host_header, "[::1]:8443");
+        assert_eq!(s.tls_server_name, "::1");
     }
 
     #[test]

@@ -295,6 +295,13 @@ async fn bind_socket<T: BindSocket>(socket: &T, indicator: &SocketAddr) -> io::R
     }))
 }
 
+pub(crate) async fn bind_outbound_tcp_socket(
+    socket: &TcpSocket,
+    indicator: &SocketAddr,
+) -> io::Result<()> {
+    bind_socket(socket, indicator).await
+}
+
 // New UDP socket.
 pub async fn new_udp_socket(indicator: &SocketAddr) -> io::Result<UdpSocket> {
     let socket = match indicator {
