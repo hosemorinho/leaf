@@ -7,7 +7,7 @@ use std::{
 #[cfg(target_os = "android")]
 use jni::objects::{GlobalRef, JClass, JObject, JString};
 #[cfg(target_os = "android")]
-use jni::sys::{jboolean, jint, JNI_VERSION_1_6};
+use jni::sys::{jboolean, jint, jlong, jlongArray, JNI_VERSION_1_6};
 #[cfg(target_os = "android")]
 use jni::{JNIEnv, JavaVM};
 
@@ -911,4 +911,46 @@ pub unsafe extern "system" fn Java_com_follow_clash_common_LeafBridge_leafTestCo
     let config: String = config.into();
     let config_ptr = std::ffi::CString::new(config).unwrap();
     leaf_test_config_string(config_ptr.as_ptr())
+}
+
+/// JNI: Health check one outbound and return [code, tcp_ms, udp_ms].
+#[cfg(target_os = "android")]
+#[allow(non_snake_case)]
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_follow_clash_common_LeafBridge_leafHealthCheckWithLatency(
+    mut env: JNIEnv,
+    _class: JClass,
+    rt_id: jint,
+    outbound_tag: JString,
+    timeout_ms: jlong,
+) -> jlongArray {
+    let Ok(result) = env.new_long_array(3) else {
+        return std::ptr::null_mut();
+    };
+
+    let code = if let Ok(tag) = env.get_string(&outbound_tag) {
+        let tag: String = tag.into();
+        if let Ok(tag_cstr) = std::ffi::CString::new(tag) {
+            let mut tcp_ms: u64 = 0;
+            let mut udp_ms: u64 = 0;
+            let timeout = if timeout_ms < 0 { 0 } else { timeout_ms as u64 };
+            let status = leaf_health_check_with_latency(
+                rt_id as u16,
+                tag_cstr.as_ptr(),
+                timeout,
+                &mut tcp_ms as *mut u64,
+                &mut udp_ms as *mut u64,
+            );
+            let values: [i64; 3] = [status as i64, tcp_ms as i64, udp_ms as i64];
+            let _ = env.set_long_array_region(&result, 0, &values);
+            return result.into_raw();
+        }
+        ERR_CONFIG_PATH
+    } else {
+        ERR_CONFIG_PATH
+    };
+
+    let values: [i64; 3] = [code as i64, 0, 0];
+    let _ = env.set_long_array_region(&result, 0, &values);
+    result.into_raw()
 }
