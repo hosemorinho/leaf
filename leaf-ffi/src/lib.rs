@@ -248,9 +248,9 @@ pub unsafe extern "C" fn leaf_test_config(config_path: *const c_char) -> i32 {
 
 /// Runs a health check for an outbound.
 ///
-/// This performs an active health check by sending a PING to healthcheck.leaf
-/// and waiting for a PONG response through the specified outbound, testing both
-/// TCP and UDP protocols.
+/// This performs an active health check through the specified outbound:
+/// - TCP: send an HTTP HEAD request and measure response latency.
+/// - UDP: send a lightweight probe and measure response latency.
 ///
 /// @param rt_id The ID of the leaf instance.
 /// @param outbound_tag The tag of the outbound to test.
@@ -569,11 +569,7 @@ pub unsafe extern "C" fn leaf_health_check_with_latency(
 ///         negative value -(required_size) if buffer too small,
 ///         or error code on failure.
 #[no_mangle]
-pub unsafe extern "C" fn leaf_get_stats(
-    rt_id: u16,
-    buf: *mut c_char,
-    buf_len: i32,
-) -> i32 {
+pub unsafe extern "C" fn leaf_get_stats(rt_id: u16, buf: *mut c_char, buf_len: i32) -> i32 {
     #[derive(serde::Serialize)]
     struct Stat {
         network: String,
@@ -627,10 +623,7 @@ pub unsafe extern "C" fn leaf_get_stats(
 /// @param value NUL-terminated UTF-8 env var value (e.g. "/data/data/com.app/files/leaf").
 #[no_mangle]
 pub unsafe extern "C" fn leaf_set_env(key: *const c_char, value: *const c_char) {
-    if let (Ok(k), Ok(v)) = (
-        CStr::from_ptr(key).to_str(),
-        CStr::from_ptr(value).to_str(),
-    ) {
+    if let (Ok(k), Ok(v)) = (CStr::from_ptr(key).to_str(), CStr::from_ptr(value).to_str()) {
         std::env::set_var(k, v);
     }
 }
@@ -691,13 +684,9 @@ pub unsafe extern "system" fn Java_com_follow_clash_common_LeafBridge_nativeSetP
         .find_class("com/follow/clash/common/LeafBridge")
         .ok()
         .and_then(|cls| {
-            env.get_static_field(
-                &cls,
-                "INSTANCE",
-                "Lcom/follow/clash/common/LeafBridge;",
-            )
-            .ok()
-            .and_then(|value| value.l().ok())
+            env.get_static_field(&cls, "INSTANCE", "Lcom/follow/clash/common/LeafBridge;")
+                .ok()
+                .and_then(|value| value.l().ok())
         })
         .unwrap_or(receiver);
 
@@ -726,7 +715,10 @@ pub unsafe extern "system" fn Java_com_follow_clash_common_LeafBridge_leafSetEnv
     let Ok(value) = env.get_string(&value) else {
         return;
     };
-    std::env::set_var(key.to_string_lossy().as_ref(), value.to_string_lossy().as_ref());
+    std::env::set_var(
+        key.to_string_lossy().as_ref(),
+        value.to_string_lossy().as_ref(),
+    );
 }
 
 /// JNI: Start leaf with options. Blocks the calling thread.
@@ -867,7 +859,11 @@ pub unsafe extern "system" fn Java_com_follow_clash_common_LeafBridge_leafSetOut
         let select: String = select.into();
         let outbound_ptr = std::ffi::CString::new(outbound).unwrap();
         let select_ptr = std::ffi::CString::new(select).unwrap();
-        return leaf_set_outbound_selected(rt_id as u16, outbound_ptr.as_ptr(), select_ptr.as_ptr());
+        return leaf_set_outbound_selected(
+            rt_id as u16,
+            outbound_ptr.as_ptr(),
+            select_ptr.as_ptr(),
+        );
     }
 
     #[cfg(not(feature = "outbound-select"))]
